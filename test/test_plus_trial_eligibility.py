@@ -148,6 +148,67 @@ class PlusTrialEligibilityPersistenceTests(unittest.TestCase):
         self.assertEqual(account["promo_title"], "Confirmed title")
         backend_class.return_value.close.assert_called_once()
 
+    def test_chat_usability_test_persists_independent_status(self) -> None:
+        storage = MemoryStorage(
+            [
+                {
+                    "access_token": "test-token",
+                    "has_plus_promo": True,
+                    "promo_title": "Confirmed title",
+                    "chat_test_status": "未测试",
+                }
+            ]
+        )
+        service = AccountService(storage)
+
+        with (
+            patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class,
+            patch("services.protocol.conversation.conversation_events", return_value=iter([
+                {"type": "conversation.delta", "conversation_id": "conversation-1", "text": "OK"},
+                {"type": "conversation.done", "conversation_id": "conversation-1", "text": "OK"},
+            ])),
+        ):
+            result = service.test_chat_usability("test-token")
+
+        account = service.get_account("test-token")
+        self.assertEqual(result["status"], "可用")
+        self.assertTrue(result["usable"])
+        self.assertEqual(account["chat_test_status"], "可用")
+        self.assertTrue(account["has_plus_promo"])
+        self.assertEqual(account["promo_title"], "Confirmed title")
+        backend_class.return_value.delete_conversation.assert_called_once_with("conversation-1")
+        backend_class.return_value.close.assert_called_once()
+
+    def test_chat_usability_failure_is_not_reported_as_usable(self) -> None:
+        storage = MemoryStorage(
+            [
+                {
+                    "access_token": "test-token",
+                    "has_plus_promo": True,
+                    "promo_title": "Confirmed title",
+                    "chat_test_status": "可用",
+                }
+            ]
+        )
+        service = AccountService(storage)
+
+        with (
+            patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class,
+            patch(
+                "services.protocol.conversation.conversation_events",
+                side_effect=TimeoutError("upstream timeout"),
+            ),
+        ):
+            result = service.test_chat_usability("test-token")
+
+        account = service.get_account("test-token")
+        self.assertEqual(result["status"], "测试失败")
+        self.assertIsNone(result["usable"])
+        self.assertEqual(account["chat_test_status"], "测试失败")
+        self.assertTrue(account["has_plus_promo"])
+        self.assertEqual(account["promo_title"], "Confirmed title")
+        backend_class.return_value.close.assert_called_once()
+
     def test_account_view_exposes_indicator_without_renewal_secrets(self) -> None:
         view = _account_view(
             {
@@ -178,6 +239,14 @@ class AccountRouteAuthenticationTests(unittest.TestCase):
     def test_eligibility_check_rejects_unauthenticated_requests(self) -> None:
         response = self.client.post(
             "/api/accounts/plus-trial-eligibility",
+            json={"access_tokens": ["test-token"]},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_chat_usability_check_rejects_unauthenticated_requests(self) -> None:
+        response = self.client.post(
+            "/api/accounts/chat-usability",
             json={"access_tokens": ["test-token"]},
         )
 

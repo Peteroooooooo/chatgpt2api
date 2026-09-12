@@ -248,6 +248,12 @@ class AccountService:
             normalized["promo_title"] = str(item.get("promo_title") or "")
         if "promo_checked_at" in item:
             normalized["promo_checked_at"] = item.get("promo_checked_at") or None
+        chat_test_status = str(normalized.get("chat_test_status") or "未测试").strip()
+        if chat_test_status not in {"未测试", "可用", "不可用", "测试失败"}:
+            chat_test_status = "未测试"
+        normalized["chat_test_status"] = chat_test_status
+        normalized["chat_test_checked_at"] = normalized.get("chat_test_checked_at") or None
+        normalized["chat_test_error"] = str(normalized.get("chat_test_error") or "")
         normalized["created_at"] = normalized.get("created_at") or AccountService._now()
         return normalized
 
@@ -1472,6 +1478,95 @@ class AccountService:
             "eligible": eligible,
             "promo_title": title,
             "checked_at": checked_at,
+        }
+
+    @staticmethod
+    def _chat_test_failure_status(exc: Exception) -> str:
+        """区分账号明确不可用与网络/上游暂时无法判断。"""
+        from services.openai_backend_api import InvalidAccessTokenError
+
+        if isinstance(exc, InvalidAccessTokenError):
+            return "不可用"
+        message = str(exc or "").lower()
+        if any(marker in message for marker in (
+            "token invalid",
+            "unauthorized",
+            "http 401",
+            "http 403",
+            "http 429",
+        )):
+            return "不可用"
+        return "测试失败"
+
+    def test_chat_usability(self, access_token: str) -> dict[str, Any]:
+        """Send one minimal real conversation and persist only its usability status."""
+        if not access_token:
+            raise ValueError("access_token is required")
+
+        active_token = self.refresh_access_token(
+            access_token,
+            event="chat_usability_test:preflight",
+        ) or access_token
+        from services.openai_backend_api import OpenAIBackendAPI
+        from services.protocol.conversation import conversation_events
+
+        backend = OpenAIBackendAPI(active_token)
+        conversation_id = ""
+        response_text = ""
+        status = "测试失败"
+        error = ""
+        try:
+            for event in conversation_events(
+                backend,
+                messages=[{"role": "user", "content": "Reply with OK only."}],
+                model="auto",
+            ):
+                conversation_id = str(event.get("conversation_id") or conversation_id)
+                if event.get("type") == "conversation.delta":
+                    response_text = str(event.get("text") or response_text).strip()
+            if response_text:
+                status = "可用"
+            else:
+                status = "不可用"
+                error = "账号没有返回有效的对话内容"
+        except Exception as exc:
+            status = self._chat_test_failure_status(exc)
+            error = str(exc or "账号对话测试失败")[:200]
+        finally:
+            if conversation_id:
+                try:
+                    backend.delete_conversation(conversation_id)
+                except Exception:
+                    pass
+            backend.close()
+
+        checked_at = self._now()
+        account = self.update_account(
+            active_token,
+            {
+                "chat_test_status": status,
+                "chat_test_checked_at": checked_at,
+                "chat_test_error": error,
+            },
+            quiet=True,
+        )
+        if account is None:
+            raise ValueError("account not found")
+
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "实时测试账号对话可用性",
+            {
+                "token": anonymize_token(active_token),
+                "status": status,
+            },
+        )
+        return {
+            "access_token": active_token,
+            "usable": True if status == "可用" else False if status == "不可用" else None,
+            "status": status,
+            "checked_at": checked_at,
+            "error": error or None,
         }
 
     # ---- 刷新进度追踪 ----

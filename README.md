@@ -31,6 +31,34 @@
 
 ## 快速开始
 
+### GitHub fork + Portainer 部署
+
+本 fork 的发布流程是：推送 `v*` 标签后，GitHub Actions 自动构建多架构镜像并发布到 GHCR；Portainer 只负责拉取固定版本镜像，不在服务器上现场编译。
+
+1. 在 GitHub 打开 `basketikun/chatgpt2api`，点击 **Fork**，Owner 选择自己的账号。
+2. 在 fork 的 **Settings → Actions → General** 保持允许 Actions 运行。
+3. 在本地仓库添加自己的 fork 远端，推送修复分支；确认后把版本标签推送到 fork：
+
+   ```bash
+   git remote add fork https://github.com/<你的用户名>/chatgpt2api.git
+   git push fork fix/promo-eligibility-reproducible
+   git push fork v1.8.0-peter.2
+   ```
+
+4. 在 fork 的 **Actions** 页面等待 `Publish Docker Image` 成功。首次发布后，在 **Packages → chatgpt2api → Package settings** 将镜像设为 Public；如果保持 Private，就在 Portainer 配置 GHCR Registry 凭据。
+5. Portainer 新建或编辑 Stack，选择 Git Repository，使用 `docker-compose.portainer.yml`。Stack 环境变量至少填写：
+
+   ```text
+   CHATGPT2API_AUTH_KEY=<与现有 config.json 相同的管理密钥>
+   CHATGPT2API_IMAGE_TAG=1.8.0-peter.2
+   ```
+
+   数据仍使用服务器上的 `/root/chatgpt2api/data` 和 `/root/chatgpt2api/config.json`，不会因拉取新镜像而丢失。当前服务器已有 WARP、Privoxy、FlareSolverr sidecar 时，保留它们并让 app 加入现有 `chatgpt2api_chatgpt2api` 网络即可。
+
+6. 部署前停止旧 Stack 或旧 app 容器，确保 `chatgpt2api` 容器名和 `127.0.0.1:3001` 端口没有冲突；部署后访问 `/version`，确认返回目标版本，再测试一个账号。
+
+后续更新只需修改源码、更新 `VERSION`、提交并推送新的 `v*` 标签，然后在 Portainer 把 `CHATGPT2API_IMAGE_TAG` 改为新版本并重新部署。不要使用 `latest` 作为生产固定版本。
+
 ### Docker 运行
 
 ```bash
