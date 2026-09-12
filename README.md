@@ -46,18 +46,18 @@
    ```
 
 4. 在 fork 的 **Actions** 页面等待 `Publish Docker Image` 成功。在 **Packages → chatgpt2api** 确认包标为 **Public**；本 fork 已发布 `ghcr.io/peteroooooooo/chatgpt2api:1.8.0-peter.4`。
-5. 在 Portainer 的 `us-racknerd` 环境新建 Stack，选择 **Git Repository**：
+5. 在 Portainer 的 `us-racknerd` 环境新建或更新 `chatgpt2api-app` Stack，选择 **Git Repository**：
 
    ```text
    Repository URL: https://github.com/Peteroooooooo/chatgpt2api.git
-   Repository reference: refs/tags/deploy-p4.1
+   Repository reference: refs/tags/deploy-p4.3
    Compose path: docker-compose.portainer.yml
    Stack name: chatgpt2api-app
    ```
 
-   这个 Stack 默认锁定 `1.8.0-peter.4`；不需要在 Portainer 保存管理密钥。密钥保存在服务器的 `/root/chatgpt2api/config.json`（权限应为 `0600`），数据仍使用 `/root/chatgpt2api/data`。已有 WARP、Privoxy、FlareSolverr sidecar 时，app 会加入现有 `chatgpt2api_chatgpt2api` 网络。若旧的 `chatgpt2api` Stack 正在管理这些 sidecar，请保留它；新 Stack 只接管应用容器，避免迁移时中断代理链路。
+   这个 Stack 固定 app、WARP、Privoxy、FlareSolverr 的镜像 digest，并自动创建自己的内部网络；只有 app 的 `127.0.0.1:3001` 端口会暴露给宿主机。管理密钥保存在服务器的 `/root/chatgpt2api/config.json`（权限应为 `0600`），数据仍使用 `/root/chatgpt2api/data`。`proxy_runtime` 应使用内部服务地址 `http://privoxy:8118` 和 `http://flaresolverr:8191`，不再加入旧的 `chatgpt2api_chatgpt2api` 网络。
 
-6. 部署前停止旧 Stack 或旧 app 容器，确保 `chatgpt2api` 容器名和 `127.0.0.1:3001` 端口没有冲突；部署后访问 `/version`，确认返回目标版本，再测试一个账号。
+6. 从旧 Stack 迁移时，先备份数据和配置并部署新版；确认 `/version`、账号数量和一次最小对话均正常后，再删除旧的 `chatgpt2api` Stack 与其旧网络。不要把旧 Stack 的 app 容器和新 Stack 的 app 同时启动。
 
 后续更新只需修改源码、更新 `VERSION`、提交并推送新的 `v*` 标签，等待镜像发布成功；再创建一个新的 `deploy-*` Git 标签指向对应部署配置，并在 Portainer 更新 Repository reference 后重新部署。不要使用 `latest` 作为生产固定版本。
 

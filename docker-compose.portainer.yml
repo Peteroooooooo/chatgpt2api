@@ -1,19 +1,65 @@
+# Self-contained Portainer deployment. Only the app is published on the host;
+# WARP, Privoxy, and FlareSolverr communicate over this Stack's default network.
 services:
-  app:
-    image: ghcr.io/peteroooooooo/chatgpt2api:${CHATGPT2API_IMAGE_TAG:-1.8.0-peter.4}
-    container_name: chatgpt2api
+  warp-proxy:
+    image: caomingjun/warp@sha256:98d048b8996ca2e621d29887169c5c48a4f6878e2a2c647b7ea82d69540420da
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:3001:80"
+    environment:
+      WARP_SLEEP: "2"
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 0
+      net.ipv4.conf.all.src_valid_mark: 1
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1', 1080), 5); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  privoxy:
+    image: vimagick/privoxy@sha256:8db03d3e5a36800e2c7e32f17b47e21e18f476bf492f0a50e2fc43073f6bb21f
+    restart: unless-stopped
+    depends_on:
+      warp-proxy:
+        condition: service_healthy
     volumes:
-      - /root/chatgpt2api/data:/app/data
-      - /root/chatgpt2api/config.json:/app/config.json
+      - /root/chatgpt2api/privoxy-warp.conf:/etc/privoxy/config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8118 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr@sha256:139dfee1c6f89249c8d665d1333a42e8ec74ec0a86bc6bb1c8461e10d3a66a47
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
+      TZ: ${TZ:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8191/ >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  app:
+    image: ${CHATGPT2API_IMAGE:-ghcr.io/peteroooooooo/chatgpt2api@sha256:6877513d7bb4100c98ab19603761507513baf5310417719814afda74e97ee194}
+    container_name: ${CHATGPT2API_CONTAINER_NAME:-chatgpt2api}
+    restart: unless-stopped
+    depends_on:
+      privoxy:
+        condition: service_healthy
+      flaresolverr:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${CHATGPT2API_HOST_PORT:-3001}:80"
+    volumes:
+      - ${CHATGPT2API_DATA_DIR:-/root/chatgpt2api/data}:/app/data
+      - ${CHATGPT2API_CONFIG_FILE:-/root/chatgpt2api/config.json}:/app/config.json
     environment:
       STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
-    networks:
-      - chatgpt2api-runtime
-
-networks:
-  chatgpt2api-runtime:
-    external: true
-    name: ${CHATGPT2API_NETWORK:-chatgpt2api_chatgpt2api}
