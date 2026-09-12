@@ -1,0 +1,25 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        APP_VERSION: 1.8.0-peter.1
+        VCS_REF: e55aef2829e7bf1d7256d6ff3feb4b40b02743d2
+        UV_VERSION: 0.11.32
+    image: local/chatgpt2api:1.8.0-peter.1
+    container_name: chatgpt2api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:80"
+    volumes:
+      - /root/chatgpt2api/data:/app/data
+      - /root/chatgpt2api/config.json:/app/config.json
+    environment:
+      STORAGE_BACKEND: json
+    networks:
+      - chatgpt2api-runtime
+
+networks:
+  chatgpt2api-runtime:
+    external: true
+    name: ${CHATGPT2API_NETWORK:-chatgpt2api_chatgpt2api}

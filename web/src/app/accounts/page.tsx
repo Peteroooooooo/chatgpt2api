@@ -11,6 +11,8 @@ import {
   CircleOff,
   Copy,
   Download,
+  Gift,
+  KeyRound,
   Link2,
   LoaderCircle,
   LogIn,
@@ -43,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  checkPlusTrialEligibility,
   deleteAccounts,
   fetchAccounts,
   fetchModels,
@@ -186,6 +189,7 @@ function AccountsPageContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isRelogining, setIsRelogining] = useState(false);
+  const [checkingPromoTokens, setCheckingPromoTokens] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<{
     visible: boolean;
     current: number;
@@ -674,6 +678,42 @@ function AccountsPageContent() {
     }
   };
 
+  const handleCheckPlusTrialEligibility = async (accessTokens: string[]) => {
+    const tokens = Array.from(new Set(accessTokens.filter(Boolean)));
+    if (tokens.length === 0) {
+      return;
+    }
+
+    setCheckingPromoTokens((prev) => new Set([...prev, ...tokens]));
+    try {
+      const data = await checkPlusTrialEligibility(tokens);
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+
+      const eligible = data.results.filter((item) => item.eligible === true).length;
+      const ineligible = data.results.filter((item) => item.eligible === false).length;
+      const failed = data.results.filter((item) => item.eligible === null).length;
+      if (failed > 0) {
+        const firstError = data.results.find((item) => item.eligible === null)?.error;
+        if (tokens.length === 1) {
+          toast.warning(`试用资格检测失败：${firstError || "上游未返回明确结果"}（已保留原标识）`);
+        } else {
+          toast.warning(`试用资格检测完成：有资格 ${eligible}，无资格 ${ineligible}，检测失败 ${failed}（失败项保留原标识）`);
+        }
+      } else {
+        toast.success(`试用资格检测完成：有资格 ${eligible}，无资格 ${ineligible}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "试用资格检测失败");
+    } finally {
+      setCheckingPromoTokens((prev) => {
+        const next = new Set(prev);
+        tokens.forEach((token) => next.delete(token));
+        return next;
+      });
+    }
+  };
+
   const handleUpdateAccount = async () => {
     if (!editingAccount) {
       return;
@@ -733,6 +773,15 @@ function AccountsPageContent() {
           >
             <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
             一键刷新所有账号信息和额度
+          </Button>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-amber-200 bg-amber-50/80 px-4 text-amber-700 hover:bg-amber-100"
+            onClick={() => void handleCheckPlusTrialEligibility(accounts.map((item) => item.access_token))}
+            disabled={accounts.length === 0 || checkingPromoTokens.size > 0}
+          >
+            <Gift className={cn("size-4", checkingPromoTokens.size > 0 ? "animate-pulse" : "")} />
+            检测全部试用资格
           </Button>
           <AccountImportDialog
             disabled={isLoading || isRefreshing || isDeleting}
@@ -1095,6 +1144,11 @@ function AccountsPageContent() {
                             >
                               <Copy className="size-4" />
                             </button>
+                            {account.has_auto_renewal ? (
+                              <span title="已配置自动续期" className="text-emerald-600">
+                                <KeyRound className="size-4" />
+                              </span>
+                            ) : null}
                           </div>
                         </td>
                         <td className="px-4 py-3">
@@ -1117,7 +1171,18 @@ function AccountsPageContent() {
                           </Badge>
                         </td>
                         <td className="px-4 py-3">
-                          <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
+                          <div className="flex items-center gap-1.5 text-xs leading-5 text-stone-500">
+                            <span>{account.email ?? "—"}</span>
+                            {account.has_plus_promo ? (
+                              <span
+                                title={account.promo_title || "检测到 Plus 试用资格"}
+                                className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800"
+                              >
+                                <Gift className="size-3" />
+                                试用
+                              </span>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-xs leading-5 text-stone-500">
                           {(() => {
@@ -1171,6 +1236,15 @@ function AccountsPageContent() {
                         <td className="px-4 py-3 text-stone-500">{account.fail}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1 text-stone-400">
+                            <button
+                              type="button"
+                              title="检测 Plus 试用资格"
+                              className="rounded-lg p-2 text-amber-600 transition hover:bg-amber-50 hover:text-amber-700"
+                              onClick={() => void handleCheckPlusTrialEligibility([account.access_token])}
+                              disabled={checkingPromoTokens.has(account.access_token)}
+                            >
+                              <Gift className={cn("size-4", checkingPromoTokens.has(account.access_token) ? "animate-pulse" : "")} />
+                            </button>
                             <button
                               type="button"
                               className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
