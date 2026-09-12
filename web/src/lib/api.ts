@@ -44,6 +44,11 @@ export type Account = {
   chat_test_status?: "未测试" | "可用" | "不可用" | "测试失败";
   chat_test_checked_at?: string | null;
   chat_test_error?: string | null;
+  real_chat_test_status?: "未测试" | "可用" | "不可用" | "测试失败";
+  real_chat_test_checked_at?: string | null;
+  real_chat_test_error?: string | null;
+  real_chat_test_prompt?: string | null;
+  real_chat_test_conversation_url?: string | null;
 };
 
 export type AccountImportPayload = {
@@ -131,6 +136,23 @@ export type ChatUsabilityResult = {
 
 type ChatUsabilityResponse = {
   results: ChatUsabilityResult[];
+  items: Account[];
+};
+
+export type RealChatTestResult = {
+  access_token: string;
+  usable: boolean | null;
+  status: "未测试" | "可用" | "不可用" | "测试失败";
+  checked_at: string | null;
+  error: string | null;
+  prompt_id: string | null;
+  prompt: string | null;
+  conversation_id: string | null;
+  conversation_url: string | null;
+};
+
+type RealChatTestResponse = {
+  results: RealChatTestResult[];
   items: Account[];
 };
 
@@ -378,6 +400,13 @@ export async function checkPlusTrialEligibility(accessTokens: string[]) {
 
 export async function testChatUsability(accessTokens: string[]) {
   return httpRequest<ChatUsabilityResponse>("/api/accounts/chat-usability", {
+    method: "POST",
+    body: { access_tokens: accessTokens },
+  });
+}
+
+export async function testRealChat(accessTokens: string[]) {
+  return httpRequest<RealChatTestResponse>("/api/accounts/real-chat-test", {
     method: "POST",
     body: { access_tokens: accessTokens },
   });

@@ -67,6 +67,10 @@ class AccountChatUsabilityRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
 
 
+class AccountRealChatTestRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+
+
 class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     format: Literal["json", "zip"] = "json"
@@ -146,12 +150,17 @@ _ACCOUNT_RESPONSE_SECRET_FIELDS = {
     "sessionToken",
 }
 
+_ACCOUNT_RESPONSE_PRIVATE_FIELDS = {
+    "real_chat_test_prompt_history",
+    "real_chat_test_conversation_id",
+}
+
 
 def _account_view(item: dict[str, Any]) -> dict[str, Any]:
     view = {
         key: value
         for key, value in item.items()
-        if key not in _ACCOUNT_RESPONSE_SECRET_FIELDS
+        if key not in _ACCOUNT_RESPONSE_SECRET_FIELDS and key not in _ACCOUNT_RESPONSE_PRIVATE_FIELDS
     }
     view["has_auto_renewal"] = bool(
         item.get("session_token")
@@ -434,6 +443,50 @@ def create_router() -> APIRouter:
                             "status": "测试失败",
                             "checked_at": None,
                             "error": str(exc)[:200],
+                        }
+            return [item for item in results if item is not None]
+
+        results = await run_in_threadpool(run_tests)
+        return {
+            "results": results,
+            "items": _account_views(account_service.list_accounts()),
+        }
+
+    @router.post("/api/accounts/real-chat-test")
+    async def test_real_chat(
+            body: AccountRealChatTestRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        access_tokens = _unique_tokens(body.access_tokens)
+        if not access_tokens:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
+
+        def run_tests() -> list[dict[str, Any]]:
+            results: list[dict[str, Any] | None] = [None] * len(access_tokens)
+            # 真实测试会在上游保留一条对话，降低并发，避免误产生突发会话。
+            workers = min(2, len(access_tokens))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(account_service.test_real_chat, token): index
+                    for index, token in enumerate(access_tokens)
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    requested_token = access_tokens[index]
+                    try:
+                        results[index] = future.result()
+                    except Exception as exc:
+                        results[index] = {
+                            "access_token": requested_token,
+                            "usable": None,
+                            "status": "测试失败",
+                            "checked_at": None,
+                            "error": str(exc)[:200],
+                            "prompt_id": None,
+                            "prompt": None,
+                            "conversation_id": None,
+                            "conversation_url": None,
                         }
             return [item for item in results if item is not None]
 

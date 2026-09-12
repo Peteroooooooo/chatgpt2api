@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import secrets
 import time
 import uuid
@@ -18,6 +19,10 @@ from services.log_service import (
     log_service,
 )
 from services.storage.base import StorageBackend
+from services.real_chat_test_prompts import (
+    REAL_CHAT_TEST_PROMPT_HISTORY_LIMIT,
+    choose_real_chat_test_prompt,
+)
 from utils.helper import anonymize_token
 
 
@@ -38,6 +43,7 @@ class AccountService:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/145.0.0.0 Safari/537.36"
     )
+    _CONVERSATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
     # 刷新进度追踪
     _refresh_progress: dict[str, dict] = {}
@@ -55,6 +61,7 @@ class AccountService:
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
         self._token_aliases: dict[str, str] = {}
+        self._real_chat_test_active_tokens: set[str] = set()
         self._cumulative_total = self._load_cumulative_total()
 
     def _get_cumulative_file(self) -> Path:
@@ -254,6 +261,29 @@ class AccountService:
         normalized["chat_test_status"] = chat_test_status
         normalized["chat_test_checked_at"] = normalized.get("chat_test_checked_at") or None
         normalized["chat_test_error"] = str(normalized.get("chat_test_error") or "")
+        real_chat_test_status = str(normalized.get("real_chat_test_status") or "未测试").strip()
+        if real_chat_test_status not in {"未测试", "可用", "不可用", "测试失败"}:
+            real_chat_test_status = "未测试"
+        normalized["real_chat_test_status"] = real_chat_test_status
+        normalized["real_chat_test_checked_at"] = normalized.get("real_chat_test_checked_at") or None
+        normalized["real_chat_test_error"] = str(normalized.get("real_chat_test_error") or "")
+        normalized["real_chat_test_prompt_id"] = str(normalized.get("real_chat_test_prompt_id") or "").strip()
+        normalized["real_chat_test_prompt"] = str(normalized.get("real_chat_test_prompt") or "").strip()
+        conversation_id = str(normalized.get("real_chat_test_conversation_id") or "").strip()
+        if not self._CONVERSATION_ID_PATTERN.fullmatch(conversation_id):
+            conversation_id = ""
+        normalized["real_chat_test_conversation_id"] = conversation_id
+        normalized["real_chat_test_conversation_url"] = (
+            f"https://chatgpt.com/c/{conversation_id}" if conversation_id else ""
+        )
+        prompt_history = normalized.get("real_chat_test_prompt_history")
+        if not isinstance(prompt_history, list):
+            prompt_history = []
+        normalized["real_chat_test_prompt_history"] = [
+            str(item).strip()
+            for item in prompt_history
+            if str(item or "").strip()
+        ][-REAL_CHAT_TEST_PROMPT_HISTORY_LIMIT:]
         normalized["created_at"] = normalized.get("created_at") or AccountService._now()
         return normalized
 
@@ -1625,6 +1655,108 @@ class AccountService:
             "checked_at": checked_at,
             "error": error or None,
         }
+
+    def test_real_chat(self, access_token: str) -> dict[str, Any]:
+        """Send a varied real conversation and intentionally keep it visible upstream."""
+        if not access_token:
+            raise ValueError("access_token is required")
+
+        active_token = self.refresh_access_token(
+            access_token,
+            event="real_chat_test:preflight",
+        ) or access_token
+        try:
+            with self._lock:
+                active_token = self._resolve_access_token_locked(active_token)
+                account = self._accounts.get(active_token)
+                if account is None:
+                    raise ValueError("account not found")
+                if active_token in self._real_chat_test_active_tokens:
+                    raise RuntimeError("该账号正在进行真实对话测试")
+                self._real_chat_test_active_tokens.add(active_token)
+
+            recent_prompt_ids = account.get("real_chat_test_prompt_history")
+            recent_prompt_ids = recent_prompt_ids if isinstance(recent_prompt_ids, list) else []
+            prompt = choose_real_chat_test_prompt(recent_prompt_ids)
+            prompt_history = [
+                *[str(item).strip() for item in recent_prompt_ids if str(item or "").strip()],
+                prompt.id,
+            ][-REAL_CHAT_TEST_PROMPT_HISTORY_LIMIT:]
+
+            from services.openai_backend_api import OpenAIBackendAPI
+            from services.protocol.conversation import conversation_events
+
+            backend = None
+            conversation_id = ""
+            response_text = ""
+            status = "测试失败"
+            error = ""
+            try:
+                backend = OpenAIBackendAPI(active_token)
+                for event in conversation_events(
+                    backend,
+                    messages=[{"role": "user", "content": prompt.text}],
+                    model="auto",
+                    persist_conversation=True,
+                ):
+                    conversation_id = str(event.get("conversation_id") or conversation_id)
+                    if event.get("type") in {"conversation.delta", "conversation.done"}:
+                        response_text = str(event.get("text") or response_text).strip()
+                if response_text:
+                    status = "可用"
+                else:
+                    status = "不可用"
+                    error = "账号没有返回有效的对话内容"
+            except Exception as exc:
+                status = self._chat_test_failure_status(exc)
+                error = str(exc or "真实对话测试失败")[:200]
+            finally:
+                # 与快速播放测试不同：真实对话测试不调用 delete_conversation，
+                # 并且请求体使用 persist_conversation=True 以保留上游历史记录。
+                if backend is not None:
+                    backend.close()
+
+            checked_at = self._now()
+            updates = {
+                "real_chat_test_status": status,
+                "real_chat_test_checked_at": checked_at,
+                "real_chat_test_error": error,
+                "real_chat_test_prompt_id": prompt.id,
+                "real_chat_test_prompt": prompt.text,
+                "real_chat_test_prompt_history": prompt_history,
+            }
+            if conversation_id:
+                updates["real_chat_test_conversation_id"] = conversation_id
+
+            account = self.update_account(active_token, updates, quiet=True)
+            if account is None:
+                raise ValueError("account not found")
+
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "真实对话测试账号可用性",
+                {
+                    "token": anonymize_token(active_token),
+                    "status": status,
+                    "prompt_id": prompt.id,
+                    "conversation_id": conversation_id,
+                    "conversation_kept": True,
+                },
+            )
+            return {
+                "access_token": active_token,
+                "usable": True if status == "可用" else False if status == "不可用" else None,
+                "status": status,
+                "checked_at": checked_at,
+                "error": error or None,
+                "prompt_id": prompt.id,
+                "prompt": prompt.text,
+                "conversation_id": conversation_id or None,
+                "conversation_url": f"https://chatgpt.com/c/{conversation_id}" if conversation_id else None,
+            }
+        finally:
+            with self._lock:
+                self._real_chat_test_active_tokens.discard(active_token)
 
     # ---- 刷新进度追踪 ----
 
