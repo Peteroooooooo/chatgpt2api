@@ -329,6 +329,46 @@ class OpenAIBackendAPI:
         })
         return default_account
 
+    def get_plus_trial_eligibility(self) -> Dict[str, Any]:
+        """Return a definitive Plus trial eligibility result for this account.
+
+        A missing or malformed eligibility node is treated as an upstream error,
+        not as an ineligible account. This distinction prevents transient API or
+        schema failures from clearing a previously confirmed eligibility flag.
+        """
+        if not self.access_token:
+            raise RuntimeError("access_token is required")
+
+        path = "/backend-api/accounts/check/v4-2023-04-27"
+        response = self.session.get(
+            self.base_url + path + "?timezone_offset_min=-480",
+            headers=self._headers(path),
+            timeout=20,
+        )
+        if response.status_code != 200:
+            self._raise_on_error(response, path)
+
+        payload = response.json()
+        accounts = payload.get("accounts") if isinstance(payload, dict) else None
+        default_account = accounts.get("default") if isinstance(accounts, dict) else None
+        if not isinstance(default_account, dict):
+            raise RuntimeError("plus trial eligibility response is missing accounts.default")
+        if "eligible_promo_campaigns" not in default_account:
+            raise RuntimeError("plus trial eligibility response is missing eligible_promo_campaigns")
+
+        campaigns = default_account.get("eligible_promo_campaigns")
+        if not isinstance(campaigns, dict):
+            raise RuntimeError("eligible_promo_campaigns is not an object")
+        plus_campaign = campaigns.get("plus")
+        if plus_campaign is not None and not isinstance(plus_campaign, dict):
+            raise RuntimeError("eligible_promo_campaigns.plus is not an object")
+
+        eligible = bool(plus_campaign)
+        metadata = plus_campaign.get("metadata") if eligible else None
+        metadata = metadata if isinstance(metadata, dict) else {}
+        title = str(metadata.get("title") or "1-month free trial") if eligible else ""
+        return {"eligible": eligible, "title": title}
+
     def get_user_info(self) -> Dict[str, Any]:
         """获取当前 token 的账号信息。"""
         if not self.access_token:

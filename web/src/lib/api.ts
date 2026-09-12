@@ -37,6 +37,10 @@ export type Account = {
   image_inflight?: number;
   last_used_at?: string | null;
   proxy?: string | null;
+  has_auto_renewal?: boolean;
+  has_plus_promo?: boolean;
+  promo_title?: string | null;
+  promo_checked_at?: string | null;
 };
 
 export type AccountImportPayload = {
@@ -97,6 +101,19 @@ export type RefreshProgressResponse = {
 
 type AccountUpdateResponse = {
   item: Account;
+  items: Account[];
+};
+
+export type PlusTrialEligibilityResult = {
+  access_token: string;
+  eligible: boolean | null;
+  promo_title: string;
+  checked_at: string | null;
+  error: string | null;
+};
+
+type PlusTrialEligibilityResponse = {
+  results: PlusTrialEligibilityResult[];
   items: Account[];
 };
 
@@ -333,6 +350,13 @@ export async function login(authKey: string) {
 
 export async function fetchAccounts() {
   return httpRequest<AccountListResponse>("/api/accounts");
+}
+
+export async function checkPlusTrialEligibility(accessTokens: string[]) {
+  return httpRequest<PlusTrialEligibilityResponse>("/api/accounts/plus-trial-eligibility", {
+    method: "POST",
+    body: { access_tokens: accessTokens },
+  });
 }
 
 export async function fetchModels() {
