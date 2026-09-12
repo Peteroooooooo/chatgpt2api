@@ -1,6 +1,6 @@
 services:
   app:
-    image: ghcr.io/peteroooooooo/chatgpt2api:${CHATGPT2API_IMAGE_TAG:-1.8.0-peter.2}
+    image: ghcr.io/peteroooooooo/chatgpt2api:${CHATGPT2API_IMAGE_TAG:-1.8.0-peter.3}
     container_name: chatgpt2api
     restart: unless-stopped
     ports:
