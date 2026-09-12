@@ -63,6 +63,10 @@ class AccountPromoCheckRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
 
 
+class AccountChatUsabilityRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+
+
 class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     format: Literal["json", "zip"] = "json"
@@ -395,6 +399,45 @@ def create_router() -> APIRouter:
             return [item for item in results if item is not None]
 
         results = await run_in_threadpool(run_checks)
+        return {
+            "results": results,
+            "items": _account_views(account_service.list_accounts()),
+        }
+
+    @router.post("/api/accounts/chat-usability")
+    async def test_chat_usability(
+            body: AccountChatUsabilityRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        access_tokens = _unique_tokens(body.access_tokens)
+        if not access_tokens:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
+
+        def run_tests() -> list[dict[str, Any]]:
+            results: list[dict[str, Any] | None] = [None] * len(access_tokens)
+            workers = min(8, len(access_tokens))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(account_service.test_chat_usability, token): index
+                    for index, token in enumerate(access_tokens)
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    requested_token = access_tokens[index]
+                    try:
+                        results[index] = future.result()
+                    except Exception as exc:
+                        results[index] = {
+                            "access_token": requested_token,
+                            "usable": None,
+                            "status": "测试失败",
+                            "checked_at": None,
+                            "error": str(exc)[:200],
+                        }
+            return [item for item in results if item is not None]
+
+        results = await run_in_threadpool(run_tests)
         return {
             "results": results,
             "items": _account_views(account_service.list_accounts()),
