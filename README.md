@@ -52,10 +52,10 @@
    Repository URL: https://github.com/Peteroooooooo/chatgpt2api.git
    Repository reference: refs/tags/deploy-p4.1
    Compose path: docker-compose.portainer.yml
-   Stack name: chatgpt2api
+   Stack name: chatgpt2api-app
    ```
 
-   这个 Stack 默认锁定 `1.8.0-peter.4`；不需要在 Portainer 保存管理密钥。密钥保存在服务器的 `/root/chatgpt2api/config.json`（权限应为 `0600`），数据仍使用 `/root/chatgpt2api/data`。已有 WARP、Privoxy、FlareSolverr sidecar 时，app 会加入现有 `chatgpt2api_chatgpt2api` 网络。
+   这个 Stack 默认锁定 `1.8.0-peter.4`；不需要在 Portainer 保存管理密钥。密钥保存在服务器的 `/root/chatgpt2api/config.json`（权限应为 `0600`），数据仍使用 `/root/chatgpt2api/data`。已有 WARP、Privoxy、FlareSolverr sidecar 时，app 会加入现有 `chatgpt2api_chatgpt2api` 网络。若旧的 `chatgpt2api` Stack 正在管理这些 sidecar，请保留它；新 Stack 只接管应用容器，避免迁移时中断代理链路。
 
 6. 部署前停止旧 Stack 或旧 app 容器，确保 `chatgpt2api` 容器名和 `127.0.0.1:3001` 端口没有冲突；部署后访问 `/version`，确认返回目标版本，再测试一个账号。
 
