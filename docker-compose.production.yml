@@ -15,6 +15,9 @@ services:
     volumes:
       - /root/chatgpt2api/data:/app/data
       - /root/chatgpt2api/config.json:/app/config.json
+    env_file:
+      - path: /root/chatgpt2api/runtime.env
+        format: raw
     environment:
       STORAGE_BACKEND: json
     networks:
