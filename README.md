@@ -50,7 +50,7 @@
 
    ```text
    Repository URL: https://github.com/Peteroooooooo/chatgpt2api.git
-   Repository reference: refs/tags/deploy-p4.5
+   Repository reference: refs/tags/deploy-p4.6
    Compose path: docker-compose.portainer.yml
    Stack name: chatgpt2api-app
    ```
