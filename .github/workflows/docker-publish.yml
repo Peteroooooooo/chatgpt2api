@@ -67,4 +67,5 @@ jobs:
             VCS_REF=${{ github.sha }}
             UPSTREAM_REF=e55aef2829e7bf1d7256d6ff3feb4b40b02743d2
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A cache outage must not turn an already-pushed release image into a failed release.
+          cache-to: type=gha,mode=max,ignore-error=true
