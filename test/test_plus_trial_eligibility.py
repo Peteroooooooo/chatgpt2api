@@ -237,6 +237,104 @@ class PlusTrialEligibilityPersistenceTests(unittest.TestCase):
         self.assertEqual(account["session_token"], "session-secret")
         self.assertTrue(_account_view(account)["has_auto_renewal"])
 
+    def test_session_import_merges_rotated_token_for_same_user(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {
+                        "access_token": "old-token",
+                        "user_id": "user-123",
+                        "email": "person@example.com",
+                        "quota": 9,
+                        "success": 4,
+                        "has_plus_promo": True,
+                        "promo_title": "Confirmed trial",
+                        "chat_test_status": "可用",
+                        "created_at": "2025-01-02 03:04:05",
+                    }
+                ]
+            )
+        )
+
+        result = service.add_account_items(
+            [
+                {
+                    "access_token": "rotated-token",
+                    "session_token": "new-session-secret",
+                    "user_id": "user-123",
+                    "email": "person@example.com",
+                    "merge_by_user_id": True,
+                }
+            ]
+        )
+
+        accounts = service.list_accounts()
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["merged"], 1)
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["access_token"], "rotated-token")
+        self.assertEqual(accounts[0]["session_token"], "new-session-secret")
+        self.assertEqual(accounts[0]["quota"], 9)
+        self.assertTrue(accounts[0]["has_plus_promo"])
+        self.assertEqual(accounts[0]["promo_title"], "Confirmed trial")
+        self.assertEqual(accounts[0]["chat_test_status"], "可用")
+        self.assertTrue(_account_view(accounts[0])["has_auto_renewal"])
+
+    def test_same_user_id_is_not_merged_without_session_import_marker(self) -> None:
+        service = AccountService(
+            MemoryStorage([{"access_token": "old-token", "user_id": "user-123"}])
+        )
+
+        result = service.add_account_items(
+            [{"access_token": "second-token", "user_id": "user-123"}]
+        )
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["merged"], 0)
+        self.assertEqual(len(service.list_accounts()), 2)
+
+    def test_session_reimport_consolidates_existing_same_user_duplicate(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {
+                        "access_token": "old-token",
+                        "user_id": "user-123",
+                        "quota": 7,
+                        "has_plus_promo": True,
+                    },
+                    {
+                        "access_token": "rotated-token",
+                        "user_id": "user-123",
+                        "session_token": "previous-session-secret",
+                        "refresh_token": "refresh-secret",
+                    },
+                ]
+            )
+        )
+
+        result = service.add_account_items(
+            [
+                {
+                    "access_token": "rotated-token",
+                    "session_token": "new-session-secret",
+                    "user_id": "user-123",
+                    "merge_by_user_id": True,
+                }
+            ]
+        )
+
+        accounts = service.list_accounts()
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["merged"], 1)
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["access_token"], "rotated-token")
+        self.assertEqual(accounts[0]["session_token"], "new-session-secret")
+        self.assertEqual(accounts[0]["refresh_token"], "refresh-secret")
+        self.assertEqual(accounts[0]["quota"], 7)
+        self.assertTrue(accounts[0]["has_plus_promo"])
+
 
 class AccountRouteAuthenticationTests(unittest.TestCase):
     def setUp(self) -> None:
