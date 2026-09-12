@@ -1,0 +1,20 @@
+services:
+  app:
+    image: ghcr.io/peteroooooooo/chatgpt2api:${CHATGPT2API_IMAGE_TAG:-1.8.0-peter.2}
+    container_name: chatgpt2api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:80"
+    volumes:
+      - /root/chatgpt2api/data:/app/data
+      - /root/chatgpt2api/config.json:/app/config.json
+    environment:
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
+      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:?Set CHATGPT2API_AUTH_KEY in Portainer stack environment}
+    networks:
+      - chatgpt2api-runtime
+
+networks:
+  chatgpt2api-runtime:
+    external: true
+    name: ${CHATGPT2API_NETWORK:-chatgpt2api_chatgpt2api}
