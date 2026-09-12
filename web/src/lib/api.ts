@@ -41,6 +41,9 @@ export type Account = {
   has_plus_promo?: boolean;
   promo_title?: string | null;
   promo_checked_at?: string | null;
+  chat_test_status?: "未测试" | "可用" | "不可用" | "测试失败";
+  chat_test_checked_at?: string | null;
+  chat_test_error?: string | null;
 };
 
 export type AccountImportPayload = {
@@ -114,6 +117,19 @@ export type PlusTrialEligibilityResult = {
 
 type PlusTrialEligibilityResponse = {
   results: PlusTrialEligibilityResult[];
+  items: Account[];
+};
+
+export type ChatUsabilityResult = {
+  access_token: string;
+  usable: boolean | null;
+  status: "未测试" | "可用" | "不可用" | "测试失败";
+  checked_at: string | null;
+  error: string | null;
+};
+
+type ChatUsabilityResponse = {
+  results: ChatUsabilityResult[];
   items: Account[];
 };
 
@@ -354,6 +370,13 @@ export async function fetchAccounts() {
 
 export async function checkPlusTrialEligibility(accessTokens: string[]) {
   return httpRequest<PlusTrialEligibilityResponse>("/api/accounts/plus-trial-eligibility", {
+    method: "POST",
+    body: { access_tokens: accessTokens },
+  });
+}
+
+export async function testChatUsability(accessTokens: string[]) {
+  return httpRequest<ChatUsabilityResponse>("/api/accounts/chat-usability", {
     method: "POST",
     body: { access_tokens: accessTokens },
   });

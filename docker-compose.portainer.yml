@@ -1,13 +1,6 @@
 services:
   app:
-    build:
-      context: .
-      args:
-        APP_VERSION: 1.8.0-peter.2
-        VCS_REF: ${VCS_REF:-local}
-        UPSTREAM_REF: e55aef2829e7bf1d7256d6ff3feb4b40b02743d2
-        UV_VERSION: 0.11.32
-    image: local/chatgpt2api:1.8.0-peter.2
+    image: ghcr.io/peteroooooooo/chatgpt2api:${CHATGPT2API_IMAGE_TAG:-1.8.0-peter.2}
     container_name: chatgpt2api
     restart: unless-stopped
     ports:
@@ -15,11 +8,9 @@ services:
     volumes:
       - /root/chatgpt2api/data:/app/data
       - /root/chatgpt2api/config.json:/app/config.json
-    env_file:
-      - path: /root/chatgpt2api/runtime.env
-        format: raw
     environment:
-      STORAGE_BACKEND: json
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
+      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:?Set CHATGPT2API_AUTH_KEY in Portainer stack environment}
     networks:
       - chatgpt2api-runtime
 

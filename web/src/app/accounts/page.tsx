@@ -17,6 +17,7 @@ import {
   LoaderCircle,
   LogIn,
   Pencil,
+  Play,
   RefreshCw,
   Search,
   Trash2,
@@ -53,6 +54,7 @@ import {
   fetchReLoginProgress,
   reLoginAccounts,
   refreshAccounts,
+  testChatUsability,
   testProxy,
   updateAccount,
   type Account,
@@ -190,6 +192,7 @@ function AccountsPageContent() {
   const [isUpdating, setIsUpdating] = useState(false);
   const [isRelogining, setIsRelogining] = useState(false);
   const [checkingPromoTokens, setCheckingPromoTokens] = useState<Set<string>>(new Set());
+  const [testingChatTokens, setTestingChatTokens] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<{
     visible: boolean;
     current: number;
@@ -714,6 +717,42 @@ function AccountsPageContent() {
     }
   };
 
+  const handleTestChatUsability = async (accessTokens: string[]) => {
+    const tokens = Array.from(new Set(accessTokens.filter(Boolean)));
+    if (tokens.length === 0) {
+      return;
+    }
+
+    setTestingChatTokens((prev) => new Set([...prev, ...tokens]));
+    try {
+      const data = await testChatUsability(tokens);
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+
+      const usable = data.results.filter((item) => item.status === "可用").length;
+      const unusable = data.results.filter((item) => item.status === "不可用").length;
+      const failed = data.results.filter((item) => item.status === "测试失败").length;
+      if (failed > 0) {
+        const firstError = data.results.find((item) => item.status === "测试失败")?.error;
+        toast.warning(
+          tokens.length === 1
+            ? `实时对话测试失败：${firstError || "上游暂时无法判断"}`
+            : `实时对话测试完成：可用 ${usable}，不可用 ${unusable}，测试失败 ${failed}`,
+        );
+      } else {
+        toast.success(`实时对话测试完成：可用 ${usable}，不可用 ${unusable}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "实时对话测试失败");
+    } finally {
+      setTestingChatTokens((prev) => {
+        const next = new Set(prev);
+        tokens.forEach((token) => next.delete(token));
+        return next;
+      });
+    }
+  };
+
   const handleUpdateAccount = async () => {
     if (!editingAccount) {
       return;
@@ -779,6 +818,7 @@ function AccountsPageContent() {
             className="h-10 rounded-xl border-amber-200 bg-amber-50/80 px-4 text-amber-700 hover:bg-amber-100"
             onClick={() => void handleCheckPlusTrialEligibility(accounts.map((item) => item.access_token))}
             disabled={accounts.length === 0 || checkingPromoTokens.size > 0}
+            title="只检测 Plus 试用资格，不会测试账号能否正常聊天"
           >
             <Gift className={cn("size-4", checkingPromoTokens.size > 0 ? "animate-pulse" : "")} />
             检测全部试用资格
@@ -1110,6 +1150,15 @@ function AccountsPageContent() {
                 <tbody>
                   {currentRows.map((account) => {
                     const status = statusMeta[account.status];
+                    const chatTestStatus = account.chat_test_status || "未测试";
+                    const chatTestStatusClass =
+                      chatTestStatus === "可用"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : chatTestStatus === "不可用"
+                          ? "border-rose-200 bg-rose-50 text-rose-700"
+                          : chatTestStatus === "测试失败"
+                            ? "border-amber-200 bg-amber-50 text-amber-700"
+                            : "border-stone-200 bg-stone-50 text-stone-500";
                     const StatusIcon = status.icon;
 
                     return (
@@ -1145,7 +1194,11 @@ function AccountsPageContent() {
                               <Copy className="size-4" />
                             </button>
                             {account.has_auto_renewal ? (
-                              <span title="已配置自动续期" className="text-emerald-600">
+                              <span
+                                title="绿色钥匙：已配置自动续期凭据。Access Token 过期后，系统可尝试用 Session/Refresh Token 自动换取新令牌；这不代表账号当前对话一定可用。"
+                                aria-label="已配置自动续期凭据"
+                                className="text-emerald-600"
+                              >
                                 <KeyRound className="size-4" />
                               </span>
                             ) : null}
@@ -1175,7 +1228,7 @@ function AccountsPageContent() {
                             <span>{account.email ?? "—"}</span>
                             {account.has_plus_promo ? (
                               <span
-                                title={account.promo_title || "检测到 Plus 试用资格"}
+                                title={account.promo_title || "已检测到 Plus 试用资格；这不代表账号当前对话一定可用。"}
                                 className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800"
                               >
                                 <Gift className="size-3" />
@@ -1235,16 +1288,30 @@ function AccountsPageContent() {
                         <td className="px-4 py-3 text-stone-500">{account.success}</td>
                         <td className="px-4 py-3 text-stone-500">{account.fail}</td>
                         <td className="px-4 py-3">
-                          <div className="flex items-center gap-1 text-stone-400">
+                          <div className="flex items-center gap-1.5 text-stone-400">
                             <button
                               type="button"
-                              title="检测 Plus 试用资格"
-                              className="rounded-lg p-2 text-amber-600 transition hover:bg-amber-50 hover:text-amber-700"
-                              onClick={() => void handleCheckPlusTrialEligibility([account.access_token])}
-                              disabled={checkingPromoTokens.has(account.access_token)}
+                              title="播放测试：实时发送一次最小对话，确认这个账号当前能否使用"
+                              aria-label="实时测试账号对话可用性"
+                              className="rounded-lg p-2 text-emerald-600 transition hover:bg-emerald-50 hover:text-emerald-700"
+                              onClick={() => void handleTestChatUsability([account.access_token])}
+                              disabled={testingChatTokens.has(account.access_token)}
                             >
-                              <Gift className={cn("size-4", checkingPromoTokens.has(account.access_token) ? "animate-pulse" : "")} />
+                              <Play className={cn("size-4", testingChatTokens.has(account.access_token) ? "animate-pulse" : "")} />
                             </button>
+                            <span
+                              title={
+                                chatTestStatus === "测试失败"
+                                  ? account.chat_test_error || "上游暂时无法判断账号可用性"
+                                  : "实时发送一次最小对话后的账号可用性状态；不会改变 Plus 试用标识。"
+                              }
+                              className={cn(
+                                "inline-flex min-w-[3.5rem] items-center justify-center rounded-md border px-1.5 py-1 text-[11px] font-medium",
+                                chatTestStatusClass,
+                              )}
+                            >
+                              {testingChatTokens.has(account.access_token) ? "检测中" : chatTestStatus}
+                            </span>
                             <button
                               type="button"
                               className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
