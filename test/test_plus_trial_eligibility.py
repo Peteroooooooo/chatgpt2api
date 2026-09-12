@@ -224,6 +224,19 @@ class PlusTrialEligibilityPersistenceTests(unittest.TestCase):
         self.assertNotIn("refresh_token", view)
         self.assertNotIn("session_token", view)
 
+    def test_session_import_payload_adds_renewal_credential_to_existing_account(self) -> None:
+        service = AccountService(MemoryStorage([{"access_token": "test-token"}]))
+
+        result = service.add_account_items(
+            [{"access_token": "test-token", "session_token": "session-secret"}]
+        )
+
+        account = service.get_account("test-token")
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(account["session_token"], "session-secret")
+        self.assertTrue(_account_view(account)["has_auto_renewal"])
+
 
 class AccountRouteAuthenticationTests(unittest.TestCase):
     def setUp(self) -> None:
