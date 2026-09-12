@@ -10,7 +10,6 @@ services:
       - /root/chatgpt2api/config.json:/app/config.json
     environment:
       STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
-      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:?Set CHATGPT2API_AUTH_KEY in Portainer stack environment}
     networks:
       - chatgpt2api-runtime
 
