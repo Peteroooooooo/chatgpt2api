@@ -66,4 +66,4 @@ LABEL org.opencontainers.image.title="chatgpt2api-peter" \
 
 EXPOSE 80
 
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80", "--access-log"]
+CMD ["/app/.venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80", "--access-log"]
