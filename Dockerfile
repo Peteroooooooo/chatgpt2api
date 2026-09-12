@@ -23,7 +23,8 @@ ARG TARGETPLATFORM
 ARG TARGETARCH
 ARG UV_VERSION=0.11.32
 ARG APP_VERSION=1.8.0-peter.1
-ARG VCS_REF=e55aef2829e7bf1d7256d6ff3feb4b40b02743d2
+ARG VCS_REF=local
+ARG UPSTREAM_REF=e55aef2829e7bf1d7256d6ff3feb4b40b02743d2
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -60,7 +61,8 @@ LABEL org.opencontainers.image.title="chatgpt2api-peter" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.source="https://github.com/basketikun/chatgpt2api" \
-      org.opencontainers.image.description="Reproducible chatgpt2api build with authenticated Plus trial eligibility checks"
+      org.opencontainers.image.description="Reproducible chatgpt2api build with authenticated Plus trial eligibility checks" \
+      com.peter.chatgpt2api.upstream-revision="${UPSTREAM_REF}"
 
 EXPOSE 80
 
