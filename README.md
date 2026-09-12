@@ -42,10 +42,10 @@
    ```bash
    git remote add fork https://github.com/<你的用户名>/chatgpt2api.git
    git push fork fix/promo-eligibility-reproducible
-   git push fork v1.8.0-peter.6
+   git push fork v1.8.0-peter.7
    ```
 
-4. 在 fork 的 **Actions** 页面等待 `Publish Docker Image` 成功。在 **Packages → chatgpt2api** 确认包标为 **Public**；本 fork 已发布 `ghcr.io/peteroooooooo/chatgpt2api:1.8.0-peter.6`。
+4. 在 fork 的 **Actions** 页面等待 `Publish Docker Image` 成功。在 **Packages → chatgpt2api** 确认包标为 **Public**；本 fork 已发布 `ghcr.io/peteroooooooo/chatgpt2api:1.8.0-peter.7`。
 5. 在 Portainer 的 `us-racknerd` 环境新建或更新 `chatgpt2api-app` Stack，选择 **Git Repository**：
 
    ```text
@@ -60,6 +60,12 @@
 6. 从旧 Stack 迁移时，先备份数据和配置并部署新版；确认 `/version`、账号数量和一次最小对话均正常后，再删除旧的 `chatgpt2api` Stack 与其旧网络。不要把旧 Stack 的 app 容器和新 Stack 的 app 同时启动。
 
 后续更新只需修改源码、更新 `VERSION`、提交并推送新的 `v*` 标签，等待镜像发布成功；再创建一个新的 `deploy-*` Git 标签指向对应部署配置，并在 Portainer 更新 Repository reference 后重新部署。不要使用 `latest` 作为生产固定版本。
+
+### 账号测试
+
+- **▶ 快速测试**：发送固定的最小对话 `Reply with OK only.`；收到有效回复即标记可用，随后隐藏测试会话。它适合快速检查账号当前是否能对话。
+- **💬 真实对话**：从内置的 48 条安全短问题中随机抽取，避开该账号最近 8 次题目；请求会明确保留历史，且不会调用隐藏对话接口。页面会记录题目、独立状态，并在获取到会话 ID 时提供打开链接。若 ChatGPT 账号自身关闭聊天记录，平台仍可能不显示该历史。
+- 两种状态分别显示为 `快：…` 和 `真：…`，均不会修改 Plus 试用资格或绿色自动续期钥匙。真实对话测试限制为最多两个账号并行，同一账号同时只能运行一次。
 
 ### Docker 运行
 
