@@ -4,7 +4,8 @@ services:
       context: .
       args:
         APP_VERSION: 1.8.0-peter.1
-        VCS_REF: e55aef2829e7bf1d7256d6ff3feb4b40b02743d2
+        VCS_REF: ${VCS_REF:-local}
+        UPSTREAM_REF: e55aef2829e7bf1d7256d6ff3feb4b40b02743d2
         UV_VERSION: 0.11.32
     image: local/chatgpt2api:1.8.0-peter.1
     container_name: chatgpt2api
