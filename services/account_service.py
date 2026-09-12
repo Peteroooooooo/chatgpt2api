@@ -1156,6 +1156,10 @@ class AccountService:
         return str(item.get("access_token") or item.get("accessToken") or "").strip()
 
     @staticmethod
+    def _account_payload_user_id(item: dict) -> str:
+        return str(item.get("user_id") or item.get("userId") or "").strip()
+
+    @staticmethod
     def _prepare_account_payload(item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
@@ -1165,6 +1169,16 @@ class AccountService:
         payload = dict(item)
         payload.pop("accessToken", None)
         payload["access_token"] = access_token
+        user_id = AccountService._account_payload_user_id(payload)
+        payload.pop("userId", None)
+        if user_id:
+            payload["user_id"] = user_id
+        else:
+            payload.pop("user_id", None)
+        # 只有 Session JSON 导入会携带这个一次性标记；它不会写入账号文件。
+        merge_by_user_id = bool(payload.pop("merge_by_user_id", False))
+        if merge_by_user_id and user_id:
+            payload["_merge_by_user_id"] = True
         # CPA/Codex 导出文件里的 `type=codex` 是导出格式，不是号池套餐类型。
         if str(payload.get("type") or "").strip().lower() == "codex":
             payload["export_type"] = "codex"
@@ -1207,19 +1221,58 @@ class AccountService:
         if not deduped:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
 
-        with self._lock:
+        with self._image_slot_condition:
             added = 0
             skipped = 0
+            merged = 0
             for access_token, payload in deduped.items():
+                incoming = dict(payload)
+                merge_by_user_id = bool(incoming.pop("_merge_by_user_id", False))
+                user_id = self._account_payload_user_id(incoming)
+                same_user_tokens = [
+                    token
+                    for token, account in self._accounts.items()
+                    if (
+                        merge_by_user_id
+                        and user_id
+                        and token != access_token
+                        and self._account_payload_user_id(account) == user_id
+                    )
+                ]
                 current = self._accounts.get(access_token)
-                if current is None:
+                if same_user_tokens:
+                    # 新 Session JSON 的 access_token 可能已轮换。以最早的旧记录为
+                    # 状态基底，将新凭据写入新 Token，避免同一 ChatGPT 身份留下两行。
+                    existing_current = current
+                    current = dict(self._accounts[same_user_tokens[0]])
+                    if existing_current:
+                        # 同一新 Token 已存在时，保留它已获得的 OAuth 续期后备凭据；
+                        # 随后的 incoming session_token 仍会以刚导入的值为准。
+                        for key in (
+                            "refresh_token",
+                            "id_token",
+                            "access_token_expires_at",
+                            "auth_session_expires_at",
+                        ):
+                            if existing_current.get(key):
+                                current[key] = existing_current[key]
+                    for old_token in same_user_tokens:
+                        self._accounts.pop(old_token, None)
+                        self._token_aliases[old_token] = access_token
+                        old_inflight = int(self._image_inflight.pop(old_token, 0))
+                        if old_inflight:
+                            self._image_inflight[access_token] = (
+                                int(self._image_inflight.get(access_token, 0)) + old_inflight
+                            )
+                    skipped += 1
+                    merged += len(same_user_tokens)
+                elif current is None:
                     added += 1
                     self._cumulative_total += 1
                     self._save_cumulative_total()
                     current = {"created_at": self._now()}
                 else:
                     skipped += 1
-                incoming = dict(payload)
                 if not incoming.get("created_at"):
                     incoming.pop("created_at", None)
                 account = self._normalize_account(
@@ -1233,10 +1286,14 @@ class AccountService:
                 if account is not None:
                     self._accounts[access_token] = account
             self._save_accounts()
+            self._image_slot_condition.notify_all()
             items = [dict(item) for item in self._accounts.values()]
-            log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
-                            {"added": added, "skipped": skipped})
-        return {"added": added, "skipped": skipped, "items": items}
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                f"新增 {added} 个账号，跳过 {skipped} 个，合并 {merged} 个同账号旧记录",
+                {"added": added, "skipped": skipped, "merged": merged},
+            )
+        return {"added": added, "skipped": skipped, "merged": merged, "items": items}
 
     def delete_accounts(self, tokens: list[str]) -> dict:
         target_set = set(token for token in tokens if token)

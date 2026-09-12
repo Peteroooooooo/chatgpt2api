@@ -72,13 +72,31 @@ function getSessionAccount(value: unknown): AccountImportPayload | null {
     return null;
   }
 
-  // chatgpt.com 的 session 响应使用 camelCase。只保留续期真正需要的字段，
-  // 避免把整份会话响应中的无关账户资料写进号池。
+  // chatgpt.com 的 session 响应使用 camelCase。只保留续期和同账号合并真正
+  // 需要的字段，避免把整份会话响应中的无关账户资料写进号池。
   const sessionTokenValue = raw.session_token ?? raw.sessionToken;
   const sessionToken = typeof sessionTokenValue === "string" ? sessionTokenValue.trim() : "";
   const account: AccountImportPayload = { access_token: token };
   if (sessionToken) {
     account.session_token = sessionToken;
+  }
+
+  const user = raw.user && typeof raw.user === "object" && !Array.isArray(raw.user)
+    ? raw.user as Record<string, unknown>
+    : {};
+  const userIdValue = raw.user_id ?? raw.userId ?? user.id;
+  const userId = typeof userIdValue === "string" ? userIdValue.trim() : "";
+  if (userId) {
+    account.user_id = userId;
+    // 只有完整 Session JSON 明确提供 user_id 时才允许按同一账号合并，
+    // 普通 Token / 账号 JSON 导入仍维持原有的按 Token 去重行为。
+    account.merge_by_user_id = true;
+  }
+
+  const emailValue = raw.email ?? user.email;
+  const email = typeof emailValue === "string" ? emailValue.trim() : "";
+  if (email) {
+    account.email = email;
   }
   return account;
 }
@@ -390,7 +408,9 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
 
       await submitTokens(
         [account.access_token],
-        account.session_token ? "Session JSON 导入完成，已保留自动续期凭据" : "Session JSON 导入完成",
+        account.session_token
+          ? "Session JSON 导入完成，已保留自动续期凭据；同一账号的旧 Token 会自动合并"
+          : "Session JSON 导入完成",
         [account],
       );
     } catch (error) {
