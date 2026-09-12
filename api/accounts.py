@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Literal
 
@@ -55,6 +56,10 @@ class AccountDeleteRequest(BaseModel):
 
 
 class AccountRefreshRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+
+
+class AccountPromoCheckRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
 
 
@@ -126,6 +131,52 @@ def _account_payload_token(item: dict[str, Any]) -> str:
 
 def _unique_tokens(tokens: list[str]) -> list[str]:
     return list(dict.fromkeys(str(token or "").strip() for token in tokens if str(token or "").strip()))
+
+
+_ACCOUNT_RESPONSE_SECRET_FIELDS = {
+    "password",
+    "refresh_token",
+    "refreshToken",
+    "id_token",
+    "session_token",
+    "sessionToken",
+}
+
+
+def _account_view(item: dict[str, Any]) -> dict[str, Any]:
+    view = {
+        key: value
+        for key, value in item.items()
+        if key not in _ACCOUNT_RESPONSE_SECRET_FIELDS
+    }
+    view["has_auto_renewal"] = bool(
+        item.get("session_token")
+        or item.get("sessionToken")
+        or item.get("refresh_token")
+        or item.get("refreshToken")
+    )
+    return view
+
+
+def _account_views(items: Any) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    return [_account_view(item) for item in items if isinstance(item, dict)]
+
+
+def _with_account_views(result: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(result)
+    if "items" in sanitized:
+        sanitized["items"] = _account_views(sanitized.get("items"))
+    return sanitized
+
+
+def _progress_view(progress: dict[str, Any]) -> dict[str, Any]:
+    view = dict(progress)
+    result = view.get("result")
+    if isinstance(result, dict):
+        view["result"] = _with_account_views(result)
+    return view
 
 
 def _download_timestamp() -> str:
@@ -210,7 +261,7 @@ def create_router() -> APIRouter:
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"items": account_service.list_accounts()}
+        return {"items": _account_views(account_service.list_accounts())}
 
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
@@ -235,7 +286,7 @@ def create_router() -> APIRouter:
             **result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
-            "items": refresh_result.get("items", result.get("items", [])),
+            "items": _account_views(refresh_result.get("items", result.get("items", []))),
         }
 
     @router.delete("/api/accounts")
@@ -244,7 +295,7 @@ def create_router() -> APIRouter:
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        return account_service.delete_accounts(tokens)
+        return _with_account_views(account_service.delete_accounts(tokens))
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
@@ -273,7 +324,7 @@ def create_router() -> APIRouter:
         progress = account_service.get_refresh_progress(progress_id)
         if progress is None:
             raise HTTPException(status_code=404, detail={"error": "progress not found"})
-        return progress
+        return _progress_view(progress)
 
     @router.post("/api/accounts/re-login")
     async def re_login_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
@@ -301,7 +352,53 @@ def create_router() -> APIRouter:
         progress = account_service.get_relogin_progress(progress_id)
         if progress is None:
             raise HTTPException(status_code=404, detail={"error": "progress not found"})
-        return progress
+        return _progress_view(progress)
+
+    @router.post("/api/accounts/plus-trial-eligibility")
+    async def check_plus_trial_eligibility(
+            body: AccountPromoCheckRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        access_tokens = _unique_tokens(body.access_tokens)
+        if not access_tokens:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
+
+        def run_checks() -> list[dict[str, Any]]:
+            results: list[dict[str, Any] | None] = [None] * len(access_tokens)
+            workers = min(8, len(access_tokens))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(account_service.check_plus_trial_eligibility, token): index
+                    for index, token in enumerate(access_tokens)
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    requested_token = access_tokens[index]
+                    try:
+                        item = future.result()
+                        results[index] = {
+                            "access_token": item["access_token"],
+                            "eligible": item["eligible"],
+                            "promo_title": item["promo_title"],
+                            "checked_at": item["checked_at"],
+                            "error": None,
+                        }
+                    except Exception as exc:
+                        results[index] = {
+                            "access_token": requested_token,
+                            "eligible": None,
+                            "promo_title": "",
+                            "checked_at": None,
+                            "error": str(exc)[:200],
+                        }
+            return [item for item in results if item is not None]
+
+        results = await run_in_threadpool(run_checks)
+        return {
+            "results": results,
+            "items": _account_views(account_service.list_accounts()),
+        }
 
     @router.post("/api/accounts/export")
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
@@ -342,7 +439,10 @@ def create_router() -> APIRouter:
         account = account_service.update_account(access_token, updates)
         if account is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
-        return {"item": account, "items": account_service.list_accounts()}
+        return {
+            "item": _account_view(account),
+            "items": _account_views(account_service.list_accounts()),
+        }
 
     @router.post("/api/accounts/oauth/start")
     async def start_oauth_login(
@@ -390,7 +490,7 @@ def create_router() -> APIRouter:
             **add_result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
-            "items": refresh_result.get("items", add_result.get("items", [])),
+            "items": _account_views(refresh_result.get("items", add_result.get("items", []))),
         }
 
     @router.get("/api/cpa/pools")

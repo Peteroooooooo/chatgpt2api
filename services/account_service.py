@@ -239,6 +239,15 @@ class AccountService:
         normalized["last_token_refresh_at"] = normalized.get("last_token_refresh_at") or None
         normalized["last_token_refresh_error"] = normalized.get("last_token_refresh_error") or None
         normalized["last_token_refresh_error_at"] = normalized.get("last_token_refresh_error_at") or None
+        session_token = normalized.get("session_token") or normalized.get("sessionToken")
+        normalized.pop("sessionToken", None)
+        normalized["session_token"] = str(session_token).strip() if session_token else None
+        if "has_plus_promo" in item:
+            normalized["has_plus_promo"] = bool(item.get("has_plus_promo"))
+        if "promo_title" in item:
+            normalized["promo_title"] = str(item.get("promo_title") or "")
+        if "promo_checked_at" in item:
+            normalized["promo_checked_at"] = item.get("promo_checked_at") or None
         normalized["created_at"] = normalized.get("created_at") or AccountService._now()
         return normalized
 
@@ -404,6 +413,16 @@ class AccountService:
                 next_item["refresh_token"] = str(token_data.get("refresh_token") or "").strip()
             if token_data.get("id_token"):
                 next_item["id_token"] = str(token_data.get("id_token") or "").strip()
+            for key in (
+                "session_token",
+                "access_token_expires_at",
+                "auth_session_expires_at",
+                "email",
+                "user_id",
+                "type",
+            ):
+                if token_data.get(key) is not None:
+                    next_item[key] = token_data[key]
             next_item["last_token_refresh_at"] = now
             next_item["last_token_refresh_error"] = None
             next_item["last_token_refresh_error_at"] = None
@@ -427,10 +446,16 @@ class AccountService:
             self._save_accounts()
             self._image_slot_condition.notify_all()
 
+        mechanism = "session_token" if token_data.get("session_token") else "refresh_token"
         log_service.add(
             LOG_TYPE_ACCOUNT,
-            "refresh_token 已刷新 access_token",
-            {"source": event, "token": anonymize_token(new_token), "rotated": rotated},
+            "自动续期已刷新 access_token",
+            {
+                "source": event,
+                "mechanism": mechanism,
+                "token": anonymize_token(new_token),
+                "rotated": rotated,
+            },
         )
         return new_token
 
@@ -445,10 +470,23 @@ class AccountService:
             if not self._token_needs_refresh(active_token, force=force):
                 return active_token
             refresh_token = str(account.get("refresh_token") or "").strip()
-            if not refresh_token:
+            session_token = str(account.get("session_token") or account.get("sessionToken") or "").strip()
+            if not refresh_token and not session_token:
                 return active_token
             if not force and self._recent_token_refresh_error(account):
                 return active_token
+
+            if session_token:
+                try:
+                    from services.openai_session_service import refresh_chatgpt_session
+
+                    token_data = refresh_chatgpt_session(account)
+                    if token_data.get("access_token"):
+                        return self._apply_refreshed_tokens(active_token, token_data, event)
+                except Exception as exc:
+                    self._record_token_refresh_error(active_token, event, str(exc))
+                    if not refresh_token:
+                        return active_token
             try:
                 token_data = self._request_access_token_refresh(refresh_token, account)
             except Exception as exc:
@@ -1081,6 +1119,11 @@ class AccountService:
                 account = dict(item)
                 token = account.get("access_token") or ""
                 account["image_inflight"] = int(self._image_inflight.get(token, 0))
+                account["has_auto_renewal"] = bool(
+                    account.get("session_token")
+                    or account.get("sessionToken")
+                    or account.get("refresh_token")
+                )
                 result.append(account)
             return result
 
@@ -1379,6 +1422,57 @@ class AccountService:
                 raise
         self._record_refresh_success(active_token)
         return self.update_account(active_token, result)
+
+    def check_plus_trial_eligibility(self, access_token: str) -> dict[str, Any]:
+        """Check and persist a definitive Plus trial eligibility result.
+
+        Upstream failures are allowed to propagate. In that case this method does
+        not update eligibility fields, preserving the last confirmed result.
+        """
+        if not access_token:
+            raise ValueError("access_token is required")
+
+        active_token = self.refresh_access_token(
+            access_token,
+            event="plus_trial_eligibility:preflight",
+        ) or access_token
+        from services.openai_backend_api import OpenAIBackendAPI
+
+        backend = OpenAIBackendAPI(active_token)
+        try:
+            result = backend.get_plus_trial_eligibility()
+        finally:
+            backend.close()
+
+        eligible = bool(result.get("eligible"))
+        title = str(result.get("title") or "") if eligible else ""
+        checked_at = self._now()
+        account = self.update_account(
+            active_token,
+            {
+                "has_plus_promo": eligible,
+                "promo_title": title,
+                "promo_checked_at": checked_at,
+            },
+            quiet=True,
+        )
+        if account is None:
+            raise ValueError("account not found")
+
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "检查 Plus 试用资格",
+            {
+                "token": anonymize_token(active_token),
+                "eligible": eligible,
+            },
+        )
+        return {
+            "access_token": active_token,
+            "eligible": eligible,
+            "promo_title": title,
+            "checked_at": checked_at,
+        }
 
     # ---- 刷新进度追踪 ----
 
