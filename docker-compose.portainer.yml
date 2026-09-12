@@ -48,7 +48,7 @@ services:
       start_period: 30s
 
   app:
-    image: ${CHATGPT2API_IMAGE:-ghcr.io/peteroooooooo/chatgpt2api@sha256:9679c0179704d63eeb015a8c141c75324e9952ed320f7e658c1e2de222629e32}
+    image: ${CHATGPT2API_IMAGE:-ghcr.io/peteroooooooo/chatgpt2api@sha256:997f7462950fb4450c43647385c8fbfcf0bf86addcd0ab1430a877041313c5fb}
     container_name: ${CHATGPT2API_CONTAINER_NAME:-chatgpt2api}
     restart: unless-stopped
     depends_on:

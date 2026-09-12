@@ -42,15 +42,15 @@
    ```bash
    git remote add fork https://github.com/<你的用户名>/chatgpt2api.git
    git push fork fix/promo-eligibility-reproducible
-   git push fork v1.8.0-peter.5
+   git push fork v1.8.0-peter.6
    ```
 
-4. 在 fork 的 **Actions** 页面等待 `Publish Docker Image` 成功。在 **Packages → chatgpt2api** 确认包标为 **Public**；本 fork 已发布 `ghcr.io/peteroooooooo/chatgpt2api:1.8.0-peter.5`。
+4. 在 fork 的 **Actions** 页面等待 `Publish Docker Image` 成功。在 **Packages → chatgpt2api** 确认包标为 **Public**；本 fork 已发布 `ghcr.io/peteroooooooo/chatgpt2api:1.8.0-peter.6`。
 5. 在 Portainer 的 `us-racknerd` 环境新建或更新 `chatgpt2api-app` Stack，选择 **Git Repository**：
 
    ```text
    Repository URL: https://github.com/Peteroooooooo/chatgpt2api.git
-   Repository reference: refs/tags/deploy-p4.4
+   Repository reference: refs/tags/deploy-p4.5
    Compose path: docker-compose.portainer.yml
    Stack name: chatgpt2api-app
    ```
