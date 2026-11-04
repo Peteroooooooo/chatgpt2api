@@ -99,6 +99,31 @@ def _extract_user_id(payload: dict[str, Any]) -> str:
     return _clean(user.get("id") or payload.get("user_id"))
 
 
+SESSION_COOKIE_NAMES = ("__Secure-next-auth.session-token", "next-auth.session-token")
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/145.0.0.0 Safari/537.36"
+)
+
+
+def is_cloudflare_challenge(response: Any) -> bool:
+    text = str(getattr(response, "text", "") or "")[:4000].lower()
+    return "just a moment" in text or "cf-chl" in text or "challenge-platform" in text
+
+
+def _rotated_session_token(response: Any, current: str) -> str:
+    """next-auth may rotate the session cookie; keep the newest one."""
+    try:
+        for name in SESSION_COOKIE_NAMES:
+            value = _clean(response.cookies.get(name))
+            if value and value != current:
+                return value
+    except Exception:
+        pass
+    return current
+
+
 def _session_cookies(session_token: str) -> str:
     token = _clean(session_token)
     return "; ".join(
@@ -115,23 +140,34 @@ def refresh_chatgpt_session(account: dict[str, Any]) -> dict[str, Any]:
         raise SessionRefreshError("session_token is required")
 
     session = Session(
-        **proxy_settings.build_session_kwargs(impersonate="chrome", verify=True)
+        **proxy_settings.build_session_kwargs(
+            account=account, impersonate="chrome", verify=True, upstream=True
+        )
     )
     try:
-        response = session.get(
-            SESSION_URL,
-            headers={
-                "Accept": "application/json",
-                "Cookie": _session_cookies(session_token),
-                "Referer": "https://chatgpt.com/",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/145.0.0.0 Safari/537.36"
-                ),
-            },
-            timeout=30,
-        )
+        response = None
+        for attempt in range(2):
+            headers = proxy_settings.build_headers(
+                {
+                    "Accept": "application/json",
+                    "Cookie": _session_cookies(session_token),
+                    "Referer": "https://chatgpt.com/",
+                    "User-Agent": _USER_AGENT,
+                },
+                target_url=SESSION_URL,
+                account=account,
+                upstream=True,
+            )
+            response = session.get(SESSION_URL, headers=headers, timeout=30)
+            if response.status_code == 403 and is_cloudflare_challenge(response) and attempt == 0:
+                # Stale or missing cf_clearance: solve again through FlareSolverr and retry once.
+                proxy_settings.refresh_clearance(
+                    target_url="https://chatgpt.com", account=account, force=True, upstream=True
+                )
+                continue
+            break
+        if response.status_code == 403 and is_cloudflare_challenge(response):
+            raise SessionRefreshError("session refresh blocked by Cloudflare challenge (HTTP 403)")
         if response.status_code in {401, 403}:
             raise InvalidSessionTokenError(
                 f"session refresh failed: HTTP {response.status_code}"
@@ -141,6 +177,7 @@ def refresh_chatgpt_session(account: dict[str, Any]) -> dict[str, Any]:
                 f"session refresh failed: HTTP {response.status_code}"
             )
         payload = response.json()
+        session_token = _rotated_session_token(response, session_token)
     finally:
         session.close()
 
