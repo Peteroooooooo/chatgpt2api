@@ -96,13 +96,8 @@ class AccountKeeper:
         return remaining is not None and remaining <= hours * 3600
 
     def _refresh(self, token: str, account: dict) -> tuple[str, str]:
-        """Force a refresh_token exchange. Returns (new_token, error)."""
-        try:
-            data = self.accounts._request_access_token_refresh(str(account["refresh_token"]), account)
-        except Exception as exc:
-            self.accounts._record_token_refresh_error(token, "patrol", str(exc))
-            return token, str(exc)
-        return self.accounts._apply_refreshed_tokens(token, data, "patrol"), ""
+        """Force a session_token / refresh_token renewal. Returns (new_token, error)."""
+        return self.accounts.force_renew(token, "patrol")
 
     def _relogin(self, token: str, account: dict) -> tuple[str, str]:
         email = str(account.get("email") or "").strip()
@@ -120,7 +115,7 @@ class AccountKeeper:
         account = self.accounts.get_account(token) or {}
         email = str(account.get("email") or "").strip()
         has_password = bool(str(account.get("password") or "").strip())
-        has_rt = bool(str(account.get("refresh_token") or "").strip())
+        has_rt = bool(str(account.get("refresh_token") or "").strip() or str(account.get("session_token") or "").strip())
         entry: dict[str, Any] = {
             "at": _now().isoformat(),
             "email": email,

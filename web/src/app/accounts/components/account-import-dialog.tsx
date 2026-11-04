@@ -61,9 +61,44 @@ function splitTokens(value: string) {
     .filter(Boolean);
 }
 
-function getSessionAccessToken(value: unknown) {
-  const token = (value as { accessToken?: unknown })?.accessToken;
-  return typeof token === "string" ? token.trim() : "";
+function getSessionAccount(value: unknown): AccountImportPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const token = typeof raw.accessToken === "string" ? raw.accessToken.trim() : "";
+  if (!token) {
+    return null;
+  }
+
+  // chatgpt.com 的 session 响应使用 camelCase。只保留续期和同账号合并真正
+  // 需要的字段，避免把整份会话响应中的无关账户资料写进号池。
+  const sessionTokenValue = raw.session_token ?? raw.sessionToken;
+  const sessionToken = typeof sessionTokenValue === "string" ? sessionTokenValue.trim() : "";
+  const account: AccountImportPayload = { access_token: token };
+  if (sessionToken) {
+    account.session_token = sessionToken;
+  }
+
+  const user = raw.user && typeof raw.user === "object" && !Array.isArray(raw.user)
+    ? raw.user as Record<string, unknown>
+    : {};
+  const userIdValue = raw.user_id ?? raw.userId ?? user.id;
+  const userId = typeof userIdValue === "string" ? userIdValue.trim() : "";
+  if (userId) {
+    account.user_id = userId;
+    // 只有完整 Session JSON 明确提供 user_id 时才允许按同一账号合并，
+    // 普通 Token / 账号 JSON 导入仍维持原有的按 Token 去重行为。
+    account.merge_by_user_id = true;
+  }
+
+  const emailValue = raw.email ?? user.email;
+  const email = typeof emailValue === "string" ? emailValue.trim() : "";
+  if (email) {
+    account.email = email;
+  }
+  return account;
 }
 
 function getAccountJsonAccount(value: unknown): AccountImportPayload | null {
@@ -364,14 +399,20 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
 
     try {
       const payload = JSON.parse(sessionInput) as unknown;
-      const token = getSessionAccessToken(payload);
+      const account = getSessionAccount(payload);
 
-      if (!token) {
+      if (!account) {
         toast.error("未从 Session JSON 中提取到 accessToken");
         return;
       }
 
-      await submitTokens([token], "Session JSON 导入完成");
+      await submitTokens(
+        [account.access_token],
+        account.session_token
+          ? "Session JSON 导入完成，已保留自动续期凭据；同一账号的旧 Token 会自动合并"
+          : "Session JSON 导入完成",
+        [account],
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Session JSON 解析失败";
       toast.error(message);
@@ -521,7 +562,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               {sessionUrl}
               <ExternalLink className="size-3.5" />
             </a>
-            ，复制页面返回的完整 JSON，系统会自动提取其中的 `accessToken` 导入。
+            ，复制页面返回的完整 JSON。系统会提取 `accessToken`，并在存在时保留 `sessionToken` 作为自动续期凭据。
           </div>
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
             <div className="font-medium">风险提示</div>
@@ -728,7 +769,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         />
         <MethodCard
           title="导入 Session JSON"
-          description="从 chatgpt.com 的 session 接口复制完整 JSON，自动提取 accessToken。"
+          description="自动提取 accessToken；检测到 sessionToken 时一并保存为自动续期凭据。"
           icon={FileJson}
           onClick={() => setMethod("session")}
         />
@@ -802,7 +843,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 : method === "token"
                   ? "支持手动粘贴或从 TXT 文件导入，一行一个 Token。"
                   : method === "session"
-                    ? "粘贴完整 Session JSON，系统会自动提取 accessToken。"
+                    ? "粘贴完整 Session JSON，系统会提取 accessToken，并在存在时保存 sessionToken 用于自动续期。"
                     : method === "codex-auth"
                       ? "粘贴 Codex 认证 JSON，系统会按 codex 来源导入。"
                     : method === "oauth"
