@@ -12,6 +12,7 @@ import { ConfigCard } from "./components/config-card";
 import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
 import { ImportBrowserDialog } from "./components/import-browser-dialog";
+import { MailboxRoutingCard } from "./components/mailbox-routing-card";
 import { ProxyRuntimeCard } from "./components/proxy-runtime-card";
 import { SettingsHeader } from "./components/settings-header";
 import { Sub2APIConnections } from "./components/sub2api-connections";
@@ -28,6 +29,7 @@ const settingsTabs = [
   { value: "proxy", title: "FlareSolverr" },
   { value: "cpa", title: "CPA" },
   { value: "sub2api", title: "Sub2API" },
+  { value: "mailbox", title: "邮箱路由" },
 ];
 
 function SettingsDataController() {
@@ -112,6 +114,9 @@ function SettingsPageContent() {
         </TabsContent>
         <TabsContent value="sub2api">
           <Sub2APIConnections />
+        </TabsContent>
+        <TabsContent value="mailbox">
+          <MailboxRoutingCard />
         </TabsContent>
       </Tabs>
       <CPAPoolDialog />

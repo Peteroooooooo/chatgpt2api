@@ -62,6 +62,7 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
 import { AccountImportDialog } from "./components/account-import-dialog";
+import { PasswordImportDialog } from "./components/password-import-dialog";
 
 const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = [
   { label: "全部状态", value: "all" },
@@ -742,6 +743,10 @@ function AccountsPageContent() {
               setPage(1);
             }}
           />
+          <PasswordImportDialog
+            disabled={isLoading || isRefreshing || isDeleting}
+            onFinished={() => void loadAccounts(true)}
+          />
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
@@ -1108,13 +1113,24 @@ function AccountsPageContent() {
                           </Badge>
                         </td>
                         <td className="px-4 py-3">
-                          <Badge
-                            variant={status.badge}
-                            className="inline-flex items-center gap-1 rounded-md px-2 py-1"
-                          >
-                            <StatusIcon className="size-3.5" />
-                            {account.status}
-                          </Badge>
+                          <div className="flex flex-col items-start gap-1">
+                            <Badge
+                              variant={status.badge}
+                              className="inline-flex items-center gap-1 rounded-md px-2 py-1"
+                            >
+                              <StatusIcon className="size-3.5" />
+                              {account.status}
+                            </Badge>
+                            {account.last_relogin_error ? (
+                              <Badge
+                                variant="danger"
+                                className="max-w-full cursor-help rounded-md px-1.5 py-0 text-[11px] whitespace-nowrap"
+                                title={`重登失败${account.relogin_fail_count ? `（累计 ${account.relogin_fail_count} 次）` : ""}：${account.last_relogin_error}${account.last_relogin_at ? `\n最近尝试：${new Date(account.last_relogin_at).toLocaleString("zh-CN")}` : ""}`}
+                              >
+                                重登失败{account.relogin_fail_count ? ` ×${account.relogin_fail_count}` : ""}
+                              </Badge>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-4 py-3">
                           <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
