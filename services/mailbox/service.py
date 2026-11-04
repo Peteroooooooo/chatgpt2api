@@ -35,11 +35,33 @@ class MailboxService:
     The most specific route wins: full address, then the longest domain.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, env_config: dict | None = None):
         self.path = path
         self._lock = Lock()
-        self._data = self._load()
+        self._env = env_config if env_config is not None else self._read_env()
+        self._file = self._load()
+        self._data = self._merge()
         self._instances: dict[str, MailboxProvider] = {}
+
+    @staticmethod
+    def _read_env() -> dict:
+        try:
+            from services.mailbox.env_config import mailbox_config_from_env
+
+            return mailbox_config_from_env()
+        except Exception as exc:
+            print(f"[mailbox] cannot read MAILBOX_* env: {exc}")
+            return {"providers": {}, "routes": []}
+
+    def _merge(self) -> dict:
+        env_providers = self._env.get("providers") or {}
+        merged = {
+            "providers": {**self._file["providers"], **copy.deepcopy(env_providers)},
+            "routes": [*copy.deepcopy(self._env.get("routes") or []), *copy.deepcopy(self._file["routes"])],
+        }
+        for key, default in DEFAULTS.items():
+            merged[key] = self._env.get(key, self._file.get(key, default))
+        return merged
 
     def _load(self) -> dict:
         try:
@@ -59,7 +81,7 @@ class MailboxService:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(self._file, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         try:
             os.chmod(tmp, 0o600)
         except OSError:
@@ -77,41 +99,50 @@ class MailboxService:
         return data
 
     def update_settings(self, incoming: dict) -> dict:
-        """Replace settings; an empty secret field keeps the stored value."""
+        """Replace the UI-managed settings; env mailboxes/routes are read-only and skipped.
+
+        An empty secret field keeps the stored value.
+        """
         with self._lock:
+            env_names = set((self._env.get("providers") or {}).keys())
             providers_in = incoming.get("providers") if isinstance(incoming.get("providers"), dict) else {}
             providers: dict[str, dict] = {}
             for name, settings in providers_in.items():
                 if not isinstance(settings, dict):
                     continue
                 name = str(name).strip()
+                if name in env_names or settings.get("source") == "env":
+                    continue
                 kind = str(settings.get("kind") or "").strip()
                 if not name or kind not in PROVIDER_CLASSES:
                     raise ValueError(f"mailbox '{name}': unknown kind '{kind}'")
-                previous = self._data["providers"].get(name, {})
-                clean = {k: v for k, v in settings.items() if not str(k).startswith("has_")}
+                previous = self._file["providers"].get(name, {})
+                clean = {k: v for k, v in settings.items() if not str(k).startswith("has_") and k != "source"}
                 for key in SECRET_FIELDS:
                     if not str(clean.get(key) or "").strip() and previous.get(key):
                         clean[key] = previous[key]
                 providers[name] = clean
+            known = set(providers) | env_names
             routes: list[dict] = []
             for route in incoming.get("routes") or []:
-                if not isinstance(route, dict):
+                if not isinstance(route, dict) or route.get("source") == "env":
                     continue
                 match = str(route.get("match") or route.get("domain") or "").strip().lower()
                 provider = str(route.get("provider") or "").strip()
                 if not match or not provider:
                     continue
-                if provider not in providers:
+                if provider not in known:
                     raise ValueError(f"route '{match}' points to unknown mailbox '{provider}'")
                 routes.append({"match": match, "provider": provider})
-            next_data = {"providers": providers, "routes": routes}
+            next_file = {"providers": providers, "routes": routes}
             for key, default in DEFAULTS.items():
                 try:
-                    next_data[key] = max(10 if key == "otp_timeout_seconds" else 1, int(incoming.get(key, self._data.get(key, default))))
+                    floor = 10 if key == "otp_timeout_seconds" else 1
+                    next_file[key] = max(floor, int(incoming.get(key, self._file.get(key, default))))
                 except (TypeError, ValueError):
-                    next_data[key] = default
-            self._data = next_data
+                    next_file[key] = default
+            self._file = next_file
+            self._data = self._merge()
             self._instances.clear()
             self._save()
         return self.public_settings()

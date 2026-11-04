@@ -6,6 +6,7 @@ from pathlib import Path
 from services.mailbox.base import MailboxError, MailboxProvider, extract_code, parse_raw_message, pick_code, wait_for_code
 from services.mailbox.service import MailboxService
 
+EMPTY_ENV = {"providers": {}, "routes": []}
 NOW = datetime(2026, 11, 5, 8, 0, tzinfo=timezone.utc)
 
 
@@ -93,7 +94,7 @@ class PickTests(unittest.TestCase):
 class RouteTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.service = MailboxService(Path(self.tmp.name) / "mailboxes.json")
+        self.service = MailboxService(Path(self.tmp.name) / "mailboxes.json", env_config=EMPTY_ENV)
         self.service.update_settings({
             "providers": {
                 "cf": {"kind": "cloudflare_temp_email", "base_url": "https://mail.example", "admin_password": "s1"},
@@ -124,7 +125,7 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(public["providers"]["cf"]["admin_password"], "")
         self.assertTrue(public["providers"]["cf"]["has_admin_password"])
         self.service.update_settings(public)
-        reloaded = MailboxService(self.service.path)
+        reloaded = MailboxService(self.service.path, env_config=EMPTY_ENV)
         self.assertEqual(reloaded._data["providers"]["cf"]["admin_password"], "s1")
         self.assertEqual(reloaded._data["providers"]["qq"]["password"], "s3")
 
