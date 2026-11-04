@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import secrets
 import time
 import uuid
@@ -18,6 +19,10 @@ from services.log_service import (
     log_service,
 )
 from services.storage.base import StorageBackend
+from services.real_chat_test_prompts import (
+    REAL_CHAT_TEST_PROMPT_HISTORY_LIMIT,
+    choose_real_chat_test_prompt,
+)
 from utils.helper import anonymize_token
 
 
@@ -38,6 +43,7 @@ class AccountService:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/145.0.0.0 Safari/537.36"
     )
+    _CONVERSATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
     # 刷新进度追踪
     _refresh_progress: dict[str, dict] = {}
@@ -55,6 +61,7 @@ class AccountService:
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
         self._token_aliases: dict[str, str] = {}
+        self._real_chat_test_active_tokens: set[str] = set()
         self._cumulative_total = self._load_cumulative_total()
 
     def _get_cumulative_file(self) -> Path:
@@ -239,6 +246,44 @@ class AccountService:
         normalized["last_token_refresh_at"] = normalized.get("last_token_refresh_at") or None
         normalized["last_token_refresh_error"] = normalized.get("last_token_refresh_error") or None
         normalized["last_token_refresh_error_at"] = normalized.get("last_token_refresh_error_at") or None
+        session_token = normalized.get("session_token") or normalized.get("sessionToken")
+        normalized.pop("sessionToken", None)
+        normalized["session_token"] = str(session_token).strip() if session_token else None
+        if "has_plus_promo" in item:
+            normalized["has_plus_promo"] = bool(item.get("has_plus_promo"))
+        if "promo_title" in item:
+            normalized["promo_title"] = str(item.get("promo_title") or "")
+        if "promo_checked_at" in item:
+            normalized["promo_checked_at"] = item.get("promo_checked_at") or None
+        chat_test_status = str(normalized.get("chat_test_status") or "未测试").strip()
+        if chat_test_status not in {"未测试", "可用", "不可用", "测试失败"}:
+            chat_test_status = "未测试"
+        normalized["chat_test_status"] = chat_test_status
+        normalized["chat_test_checked_at"] = normalized.get("chat_test_checked_at") or None
+        normalized["chat_test_error"] = str(normalized.get("chat_test_error") or "")
+        real_chat_test_status = str(normalized.get("real_chat_test_status") or "未测试").strip()
+        if real_chat_test_status not in {"未测试", "可用", "不可用", "测试失败"}:
+            real_chat_test_status = "未测试"
+        normalized["real_chat_test_status"] = real_chat_test_status
+        normalized["real_chat_test_checked_at"] = normalized.get("real_chat_test_checked_at") or None
+        normalized["real_chat_test_error"] = str(normalized.get("real_chat_test_error") or "")
+        normalized["real_chat_test_prompt_id"] = str(normalized.get("real_chat_test_prompt_id") or "").strip()
+        normalized["real_chat_test_prompt"] = str(normalized.get("real_chat_test_prompt") or "").strip()
+        conversation_id = str(normalized.get("real_chat_test_conversation_id") or "").strip()
+        if not self._CONVERSATION_ID_PATTERN.fullmatch(conversation_id):
+            conversation_id = ""
+        normalized["real_chat_test_conversation_id"] = conversation_id
+        normalized["real_chat_test_conversation_url"] = (
+            f"https://chatgpt.com/c/{conversation_id}" if conversation_id else ""
+        )
+        prompt_history = normalized.get("real_chat_test_prompt_history")
+        if not isinstance(prompt_history, list):
+            prompt_history = []
+        normalized["real_chat_test_prompt_history"] = [
+            str(item).strip()
+            for item in prompt_history
+            if str(item or "").strip()
+        ][-REAL_CHAT_TEST_PROMPT_HISTORY_LIMIT:]
         normalized["created_at"] = normalized.get("created_at") or AccountService._now()
         return normalized
 
@@ -404,6 +449,16 @@ class AccountService:
                 next_item["refresh_token"] = str(token_data.get("refresh_token") or "").strip()
             if token_data.get("id_token"):
                 next_item["id_token"] = str(token_data.get("id_token") or "").strip()
+            for key in (
+                "session_token",
+                "access_token_expires_at",
+                "auth_session_expires_at",
+                "email",
+                "user_id",
+                "type",
+            ):
+                if token_data.get(key) is not None:
+                    next_item[key] = token_data[key]
             next_item["last_token_refresh_at"] = now
             next_item["last_token_refresh_error"] = None
             next_item["last_token_refresh_error_at"] = None
@@ -427,10 +482,16 @@ class AccountService:
             self._save_accounts()
             self._image_slot_condition.notify_all()
 
+        mechanism = "session_token" if token_data.get("session_token") else "refresh_token"
         log_service.add(
             LOG_TYPE_ACCOUNT,
-            "refresh_token 已刷新 access_token",
-            {"source": event, "token": anonymize_token(new_token), "rotated": rotated},
+            "自动续期已刷新 access_token",
+            {
+                "source": event,
+                "mechanism": mechanism,
+                "token": anonymize_token(new_token),
+                "rotated": rotated,
+            },
         )
         return new_token
 
@@ -445,10 +506,23 @@ class AccountService:
             if not self._token_needs_refresh(active_token, force=force):
                 return active_token
             refresh_token = str(account.get("refresh_token") or "").strip()
-            if not refresh_token:
+            session_token = str(account.get("session_token") or account.get("sessionToken") or "").strip()
+            if not refresh_token and not session_token:
                 return active_token
             if not force and self._recent_token_refresh_error(account):
                 return active_token
+
+            if session_token:
+                try:
+                    from services.openai_session_service import refresh_chatgpt_session
+
+                    token_data = refresh_chatgpt_session(account)
+                    if token_data.get("access_token"):
+                        return self._apply_refreshed_tokens(active_token, token_data, event)
+                except Exception as exc:
+                    self._record_token_refresh_error(active_token, event, str(exc))
+                    if not refresh_token:
+                        return active_token
             try:
                 token_data = self._request_access_token_refresh(refresh_token, account)
             except Exception as exc:
@@ -469,6 +543,38 @@ class AccountService:
                         t.start()
                 return active_token
             return self._apply_refreshed_tokens(active_token, token_data, event)
+
+    def force_renew(self, access_token: str, event: str = "patrol") -> tuple[str, str]:
+        """Renew now via session_token, then refresh_token. Returns (token, error); never starts a relogin."""
+        with self._token_refresh_lock:
+            resolved_token, account = self._get_account_for_token(access_token)
+            if not account:
+                return access_token, "account not found"
+            active_token = str(account.get("access_token") or resolved_token or access_token)
+            refresh_token = str(account.get("refresh_token") or "").strip()
+            session_token = str(account.get("session_token") or account.get("sessionToken") or "").strip()
+            if not refresh_token and not session_token:
+                return active_token, "no refresh_token or session_token"
+            errors: list[str] = []
+            if session_token:
+                try:
+                    from services.openai_session_service import refresh_chatgpt_session
+
+                    token_data = refresh_chatgpt_session(account)
+                    if token_data.get("access_token"):
+                        return self._apply_refreshed_tokens(active_token, token_data, event), ""
+                    errors.append("session_token: no access_token returned")
+                except Exception as exc:
+                    errors.append(f"session_token: {exc}")
+            if refresh_token:
+                try:
+                    token_data = self._request_access_token_refresh(refresh_token, account)
+                    return self._apply_refreshed_tokens(active_token, token_data, event), ""
+                except Exception as exc:
+                    errors.append(f"refresh_token: {exc}")
+            error = "; ".join(errors)
+            self._record_token_refresh_error(active_token, event, error)
+            return active_token, error
 
     _RELOGIN_RETRY_COOLDOWN_SECONDS = 6 * 60 * 60
     _RELOGIN_FORCED_EVENTS = {"manual_relogin", "patrol"}
@@ -1141,6 +1247,11 @@ class AccountService:
                 account = dict(item)
                 token = account.get("access_token") or ""
                 account["image_inflight"] = int(self._image_inflight.get(token, 0))
+                account["has_auto_renewal"] = bool(
+                    account.get("session_token")
+                    or account.get("sessionToken")
+                    or account.get("refresh_token")
+                )
                 result.append(account)
             return result
 
@@ -1167,6 +1278,10 @@ class AccountService:
         return str(item.get("access_token") or item.get("accessToken") or "").strip()
 
     @staticmethod
+    def _account_payload_user_id(item: dict) -> str:
+        return str(item.get("user_id") or item.get("userId") or "").strip()
+
+    @staticmethod
     def _prepare_account_payload(item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
@@ -1176,6 +1291,16 @@ class AccountService:
         payload = dict(item)
         payload.pop("accessToken", None)
         payload["access_token"] = access_token
+        user_id = AccountService._account_payload_user_id(payload)
+        payload.pop("userId", None)
+        if user_id:
+            payload["user_id"] = user_id
+        else:
+            payload.pop("user_id", None)
+        # 只有 Session JSON 导入会携带这个一次性标记；它不会写入账号文件。
+        merge_by_user_id = bool(payload.pop("merge_by_user_id", False))
+        if merge_by_user_id and user_id:
+            payload["_merge_by_user_id"] = True
         # CPA/Codex 导出文件里的 `type=codex` 是导出格式，不是号池套餐类型。
         if str(payload.get("type") or "").strip().lower() == "codex":
             payload["export_type"] = "codex"
@@ -1218,19 +1343,58 @@ class AccountService:
         if not deduped:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
 
-        with self._lock:
+        with self._image_slot_condition:
             added = 0
             skipped = 0
+            merged = 0
             for access_token, payload in deduped.items():
+                incoming = dict(payload)
+                merge_by_user_id = bool(incoming.pop("_merge_by_user_id", False))
+                user_id = self._account_payload_user_id(incoming)
+                same_user_tokens = [
+                    token
+                    for token, account in self._accounts.items()
+                    if (
+                        merge_by_user_id
+                        and user_id
+                        and token != access_token
+                        and self._account_payload_user_id(account) == user_id
+                    )
+                ]
                 current = self._accounts.get(access_token)
-                if current is None:
+                if same_user_tokens:
+                    # 新 Session JSON 的 access_token 可能已轮换。以最早的旧记录为
+                    # 状态基底，将新凭据写入新 Token，避免同一 ChatGPT 身份留下两行。
+                    existing_current = current
+                    current = dict(self._accounts[same_user_tokens[0]])
+                    if existing_current:
+                        # 同一新 Token 已存在时，保留它已获得的 OAuth 续期后备凭据；
+                        # 随后的 incoming session_token 仍会以刚导入的值为准。
+                        for key in (
+                            "refresh_token",
+                            "id_token",
+                            "access_token_expires_at",
+                            "auth_session_expires_at",
+                        ):
+                            if existing_current.get(key):
+                                current[key] = existing_current[key]
+                    for old_token in same_user_tokens:
+                        self._accounts.pop(old_token, None)
+                        self._token_aliases[old_token] = access_token
+                        old_inflight = int(self._image_inflight.pop(old_token, 0))
+                        if old_inflight:
+                            self._image_inflight[access_token] = (
+                                int(self._image_inflight.get(access_token, 0)) + old_inflight
+                            )
+                    skipped += 1
+                    merged += len(same_user_tokens)
+                elif current is None:
                     added += 1
                     self._cumulative_total += 1
                     self._save_cumulative_total()
                     current = {"created_at": self._now()}
                 else:
                     skipped += 1
-                incoming = dict(payload)
                 if not incoming.get("created_at"):
                     incoming.pop("created_at", None)
                 account = self._normalize_account(
@@ -1244,10 +1408,14 @@ class AccountService:
                 if account is not None:
                     self._accounts[access_token] = account
             self._save_accounts()
+            self._image_slot_condition.notify_all()
             items = [dict(item) for item in self._accounts.values()]
-            log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
-                            {"added": added, "skipped": skipped})
-        return {"added": added, "skipped": skipped, "items": items}
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                f"新增 {added} 个账号，跳过 {skipped} 个，合并 {merged} 个同账号旧记录",
+                {"added": added, "skipped": skipped, "merged": merged},
+            )
+        return {"added": added, "skipped": skipped, "merged": merged, "items": items}
 
     def delete_accounts(self, tokens: list[str]) -> dict:
         target_set = set(token for token in tokens if token)
@@ -1439,6 +1607,248 @@ class AccountService:
                 raise
         self._record_refresh_success(active_token)
         return self.update_account(active_token, result)
+
+    def check_plus_trial_eligibility(self, access_token: str) -> dict[str, Any]:
+        """Check and persist a definitive Plus trial eligibility result.
+
+        Upstream failures are allowed to propagate. In that case this method does
+        not update eligibility fields, preserving the last confirmed result.
+        """
+        if not access_token:
+            raise ValueError("access_token is required")
+
+        active_token = self.refresh_access_token(
+            access_token,
+            event="plus_trial_eligibility:preflight",
+        ) or access_token
+        from services.openai_backend_api import OpenAIBackendAPI
+
+        backend = OpenAIBackendAPI(active_token)
+        try:
+            result = backend.get_plus_trial_eligibility()
+        finally:
+            backend.close()
+
+        eligible = bool(result.get("eligible"))
+        title = str(result.get("title") or "") if eligible else ""
+        checked_at = self._now()
+        account = self.update_account(
+            active_token,
+            {
+                "has_plus_promo": eligible,
+                "promo_title": title,
+                "promo_checked_at": checked_at,
+            },
+            quiet=True,
+        )
+        if account is None:
+            raise ValueError("account not found")
+
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "检查 Plus 试用资格",
+            {
+                "token": anonymize_token(active_token),
+                "eligible": eligible,
+            },
+        )
+        return {
+            "access_token": active_token,
+            "eligible": eligible,
+            "promo_title": title,
+            "checked_at": checked_at,
+        }
+
+    @staticmethod
+    def _chat_test_failure_status(exc: Exception) -> str:
+        """区分账号明确不可用与网络/上游暂时无法判断。"""
+        from services.openai_backend_api import InvalidAccessTokenError
+
+        if isinstance(exc, InvalidAccessTokenError):
+            return "不可用"
+        message = str(exc or "").lower()
+        if any(marker in message for marker in (
+            "token invalid",
+            "unauthorized",
+            "http 401",
+            "http 403",
+            "http 429",
+        )):
+            return "不可用"
+        return "测试失败"
+
+    def test_chat_usability(self, access_token: str) -> dict[str, Any]:
+        """Send one minimal real conversation and persist only its usability status."""
+        if not access_token:
+            raise ValueError("access_token is required")
+
+        active_token = self.refresh_access_token(
+            access_token,
+            event="chat_usability_test:preflight",
+        ) or access_token
+        from services.openai_backend_api import OpenAIBackendAPI
+        from services.protocol.conversation import conversation_events
+
+        backend = OpenAIBackendAPI(active_token)
+        conversation_id = ""
+        response_text = ""
+        status = "测试失败"
+        error = ""
+        try:
+            for event in conversation_events(
+                backend,
+                messages=[{"role": "user", "content": "Reply with OK only."}],
+                model="auto",
+            ):
+                conversation_id = str(event.get("conversation_id") or conversation_id)
+                if event.get("type") == "conversation.delta":
+                    response_text = str(event.get("text") or response_text).strip()
+            if response_text:
+                status = "可用"
+            else:
+                status = "不可用"
+                error = "账号没有返回有效的对话内容"
+        except Exception as exc:
+            status = self._chat_test_failure_status(exc)
+            error = str(exc or "账号对话测试失败")[:200]
+        finally:
+            if conversation_id:
+                try:
+                    backend.delete_conversation(conversation_id)
+                except Exception:
+                    pass
+            backend.close()
+
+        checked_at = self._now()
+        account = self.update_account(
+            active_token,
+            {
+                "chat_test_status": status,
+                "chat_test_checked_at": checked_at,
+                "chat_test_error": error,
+            },
+            quiet=True,
+        )
+        if account is None:
+            raise ValueError("account not found")
+
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "实时测试账号对话可用性",
+            {
+                "token": anonymize_token(active_token),
+                "status": status,
+            },
+        )
+        return {
+            "access_token": active_token,
+            "usable": True if status == "可用" else False if status == "不可用" else None,
+            "status": status,
+            "checked_at": checked_at,
+            "error": error or None,
+        }
+
+    def test_real_chat(self, access_token: str) -> dict[str, Any]:
+        """Send a varied real conversation and intentionally keep it visible upstream."""
+        if not access_token:
+            raise ValueError("access_token is required")
+
+        active_token = self.refresh_access_token(
+            access_token,
+            event="real_chat_test:preflight",
+        ) or access_token
+        try:
+            with self._lock:
+                active_token = self._resolve_access_token_locked(active_token)
+                account = self._accounts.get(active_token)
+                if account is None:
+                    raise ValueError("account not found")
+                if active_token in self._real_chat_test_active_tokens:
+                    raise RuntimeError("该账号正在进行真实对话测试")
+                self._real_chat_test_active_tokens.add(active_token)
+
+            recent_prompt_ids = account.get("real_chat_test_prompt_history")
+            recent_prompt_ids = recent_prompt_ids if isinstance(recent_prompt_ids, list) else []
+            prompt = choose_real_chat_test_prompt(recent_prompt_ids)
+            prompt_history = [
+                *[str(item).strip() for item in recent_prompt_ids if str(item or "").strip()],
+                prompt.id,
+            ][-REAL_CHAT_TEST_PROMPT_HISTORY_LIMIT:]
+
+            from services.openai_backend_api import OpenAIBackendAPI
+            from services.protocol.conversation import conversation_events
+
+            backend = None
+            conversation_id = ""
+            response_text = ""
+            status = "测试失败"
+            error = ""
+            try:
+                backend = OpenAIBackendAPI(active_token)
+                for event in conversation_events(
+                    backend,
+                    messages=[{"role": "user", "content": prompt.text}],
+                    model="auto",
+                    persist_conversation=True,
+                ):
+                    conversation_id = str(event.get("conversation_id") or conversation_id)
+                    if event.get("type") in {"conversation.delta", "conversation.done"}:
+                        response_text = str(event.get("text") or response_text).strip()
+                if response_text:
+                    status = "可用"
+                else:
+                    status = "不可用"
+                    error = "账号没有返回有效的对话内容"
+            except Exception as exc:
+                status = self._chat_test_failure_status(exc)
+                error = str(exc or "真实对话测试失败")[:200]
+            finally:
+                # 与快速播放测试不同：真实对话测试不调用 delete_conversation，
+                # 并且请求体使用 persist_conversation=True 以保留上游历史记录。
+                if backend is not None:
+                    backend.close()
+
+            checked_at = self._now()
+            updates = {
+                "real_chat_test_status": status,
+                "real_chat_test_checked_at": checked_at,
+                "real_chat_test_error": error,
+                "real_chat_test_prompt_id": prompt.id,
+                "real_chat_test_prompt": prompt.text,
+                "real_chat_test_prompt_history": prompt_history,
+            }
+            if conversation_id:
+                updates["real_chat_test_conversation_id"] = conversation_id
+
+            account = self.update_account(active_token, updates, quiet=True)
+            if account is None:
+                raise ValueError("account not found")
+
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "真实对话测试账号可用性",
+                {
+                    "token": anonymize_token(active_token),
+                    "status": status,
+                    "prompt_id": prompt.id,
+                    "conversation_id": conversation_id,
+                    "conversation_kept": True,
+                },
+            )
+            return {
+                "access_token": active_token,
+                "usable": True if status == "可用" else False if status == "不可用" else None,
+                "status": status,
+                "checked_at": checked_at,
+                "error": error or None,
+                "prompt_id": prompt.id,
+                "prompt": prompt.text,
+                "conversation_id": conversation_id or None,
+                "conversation_url": f"https://chatgpt.com/c/{conversation_id}" if conversation_id else None,
+            }
+        finally:
+            with self._lock:
+                self._real_chat_test_active_tokens.discard(active_token)
 
     # ---- 刷新进度追踪 ----
 

@@ -11,10 +11,15 @@ import {
   CircleOff,
   Copy,
   Download,
+  Gift,
+  ExternalLink,
+  KeyRound,
   Link2,
   LoaderCircle,
   LogIn,
+  MessageCircle,
   Pencil,
+  Play,
   RefreshCw,
   Search,
   Trash2,
@@ -43,6 +48,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  checkPlusTrialEligibility,
   deleteAccounts,
   fetchAccounts,
   fetchModels,
@@ -50,6 +56,8 @@ import {
   fetchReLoginProgress,
   reLoginAccounts,
   refreshAccounts,
+  testRealChat,
+  testChatUsability,
   testProxy,
   updateAccount,
   type Account,
@@ -187,6 +195,9 @@ function AccountsPageContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isRelogining, setIsRelogining] = useState(false);
+  const [checkingPromoTokens, setCheckingPromoTokens] = useState<Set<string>>(new Set());
+  const [testingChatTokens, setTestingChatTokens] = useState<Set<string>>(new Set());
+  const [testingRealChatTokens, setTestingRealChatTokens] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<{
     visible: boolean;
     current: number;
@@ -675,6 +686,114 @@ function AccountsPageContent() {
     }
   };
 
+  const handleCheckPlusTrialEligibility = async (accessTokens: string[]) => {
+    const tokens = Array.from(new Set(accessTokens.filter(Boolean)));
+    if (tokens.length === 0) {
+      return;
+    }
+
+    setCheckingPromoTokens((prev) => new Set([...prev, ...tokens]));
+    try {
+      const data = await checkPlusTrialEligibility(tokens);
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+
+      const eligible = data.results.filter((item) => item.eligible === true).length;
+      const ineligible = data.results.filter((item) => item.eligible === false).length;
+      const failed = data.results.filter((item) => item.eligible === null).length;
+      if (failed > 0) {
+        const firstError = data.results.find((item) => item.eligible === null)?.error;
+        if (tokens.length === 1) {
+          toast.warning(`试用资格检测失败：${firstError || "上游未返回明确结果"}（已保留原标识）`);
+        } else {
+          toast.warning(`试用资格检测完成：有资格 ${eligible}，无资格 ${ineligible}，检测失败 ${failed}（失败项保留原标识）`);
+        }
+      } else {
+        toast.success(`试用资格检测完成：有资格 ${eligible}，无资格 ${ineligible}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "试用资格检测失败");
+    } finally {
+      setCheckingPromoTokens((prev) => {
+        const next = new Set(prev);
+        tokens.forEach((token) => next.delete(token));
+        return next;
+      });
+    }
+  };
+
+  const handleTestChatUsability = async (accessTokens: string[]) => {
+    const tokens = Array.from(new Set(accessTokens.filter(Boolean)));
+    if (tokens.length === 0) {
+      return;
+    }
+
+    setTestingChatTokens((prev) => new Set([...prev, ...tokens]));
+    try {
+      const data = await testChatUsability(tokens);
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+
+      const usable = data.results.filter((item) => item.status === "可用").length;
+      const unusable = data.results.filter((item) => item.status === "不可用").length;
+      const failed = data.results.filter((item) => item.status === "测试失败").length;
+      if (failed > 0) {
+        const firstError = data.results.find((item) => item.status === "测试失败")?.error;
+        toast.warning(
+          tokens.length === 1
+            ? `实时对话测试失败：${firstError || "上游暂时无法判断"}`
+            : `实时对话测试完成：可用 ${usable}，不可用 ${unusable}，测试失败 ${failed}`,
+        );
+      } else {
+        toast.success(`实时对话测试完成：可用 ${usable}，不可用 ${unusable}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "实时对话测试失败");
+    } finally {
+      setTestingChatTokens((prev) => {
+        const next = new Set(prev);
+        tokens.forEach((token) => next.delete(token));
+        return next;
+      });
+    }
+  };
+
+  const handleTestRealChat = async (accessTokens: string[]) => {
+    const tokens = Array.from(new Set(accessTokens.filter(Boolean)));
+    if (tokens.length === 0) {
+      return;
+    }
+
+    setTestingRealChatTokens((prev) => new Set([...prev, ...tokens]));
+    try {
+      const data = await testRealChat(tokens);
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+
+      const usable = data.results.filter((item) => item.status === "可用").length;
+      const unusable = data.results.filter((item) => item.status === "不可用").length;
+      const failed = data.results.filter((item) => item.status === "测试失败").length;
+      if (failed > 0) {
+        const firstError = data.results.find((item) => item.status === "测试失败")?.error;
+        toast.warning(
+          tokens.length === 1
+            ? `真实对话测试失败：${firstError || "上游暂时无法判断"}`
+            : `真实对话测试完成：可用 ${usable}，不可用 ${unusable}，测试失败 ${failed}`,
+        );
+      } else {
+        toast.success(`真实对话测试完成：可用 ${usable}，不可用 ${unusable}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "真实对话测试失败");
+    } finally {
+      setTestingRealChatTokens((prev) => {
+        const next = new Set(prev);
+        tokens.forEach((token) => next.delete(token));
+        return next;
+      });
+    }
+  };
+
   const handleUpdateAccount = async () => {
     if (!editingAccount) {
       return;
@@ -734,6 +853,16 @@ function AccountsPageContent() {
           >
             <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
             一键刷新所有账号信息和额度
+          </Button>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-amber-200 bg-amber-50/80 px-4 text-amber-700 hover:bg-amber-100"
+            onClick={() => void handleCheckPlusTrialEligibility(accounts.map((item) => item.access_token))}
+            disabled={accounts.length === 0 || checkingPromoTokens.size > 0}
+            title="只检测 Plus 试用资格，不会测试账号能否正常聊天"
+          >
+            <Gift className={cn("size-4", checkingPromoTokens.size > 0 ? "animate-pulse" : "")} />
+            检测全部试用资格
           </Button>
           <AccountImportDialog
             disabled={isLoading || isRefreshing || isDeleting}
@@ -1040,7 +1169,7 @@ function AccountsPageContent() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1000px] text-left">
+              <table className="w-full min-w-[1240px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
                     <th className="w-12 px-4 py-3">
@@ -1060,12 +1189,31 @@ function AccountsPageContent() {
                     <th className="w-18 px-4 py-3">在途</th>
                     <th className="w-18 px-4 py-3">成功</th>
                     <th className="w-18 px-4 py-3">失败</th>
+                    <th className="w-80 px-4 py-3">测试</th>
                     <th className="w-24 px-4 py-3">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {currentRows.map((account) => {
                     const status = statusMeta[account.status];
+                    const chatTestStatus = account.chat_test_status || "未测试";
+                    const chatTestStatusClass =
+                      chatTestStatus === "可用"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : chatTestStatus === "不可用"
+                          ? "border-rose-200 bg-rose-50 text-rose-700"
+                          : chatTestStatus === "测试失败"
+                            ? "border-amber-200 bg-amber-50 text-amber-700"
+                            : "border-stone-200 bg-stone-50 text-stone-500";
+                    const realChatTestStatus = account.real_chat_test_status || "未测试";
+                    const realChatTestStatusClass =
+                      realChatTestStatus === "可用"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : realChatTestStatus === "不可用"
+                          ? "border-rose-200 bg-rose-50 text-rose-700"
+                          : realChatTestStatus === "测试失败"
+                            ? "border-amber-200 bg-amber-50 text-amber-700"
+                            : "border-stone-200 bg-stone-50 text-stone-500";
                     const StatusIcon = status.icon;
 
                     return (
@@ -1100,6 +1248,15 @@ function AccountsPageContent() {
                             >
                               <Copy className="size-4" />
                             </button>
+                            {account.has_auto_renewal ? (
+                              <span
+                                title="绿色钥匙：已配置自动续期凭据。Access Token 过期后，系统可尝试用 Session/Refresh Token 自动换取新令牌；这不代表账号当前对话一定可用。"
+                                aria-label="已配置自动续期凭据"
+                                className="text-emerald-600"
+                              >
+                                <KeyRound className="size-4" />
+                              </span>
+                            ) : null}
                           </div>
                         </td>
                         <td className="px-4 py-3">
@@ -1133,7 +1290,18 @@ function AccountsPageContent() {
                           </div>
                         </td>
                         <td className="px-4 py-3">
-                          <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
+                          <div className="flex items-center gap-1.5 text-xs leading-5 text-stone-500">
+                            <span>{account.email ?? "—"}</span>
+                            {account.has_plus_promo ? (
+                              <span
+                                title={account.promo_title || "已检测到 Plus 试用资格；这不代表账号当前对话一定可用。"}
+                                className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800"
+                              >
+                                <Gift className="size-3" />
+                                试用
+                              </span>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-xs leading-5 text-stone-500">
                           {(() => {
@@ -1186,7 +1354,71 @@ function AccountsPageContent() {
                         <td className="px-4 py-3 text-stone-500">{account.success}</td>
                         <td className="px-4 py-3 text-stone-500">{account.fail}</td>
                         <td className="px-4 py-3">
-                          <div className="flex items-center gap-1 text-stone-400">
+                          <div className="flex items-center gap-1.5 text-stone-400">
+                            <button
+                              type="button"
+                              title="快速测试：发送固定最小对话，确认账号当前能否使用；测试对话会被隐藏。"
+                              aria-label="快速测试账号对话可用性"
+                              className="rounded-lg p-2 text-emerald-600 transition hover:bg-emerald-50 hover:text-emerald-700"
+                              onClick={() => void handleTestChatUsability([account.access_token])}
+                              disabled={testingChatTokens.has(account.access_token) || testingRealChatTokens.has(account.access_token)}
+                            >
+                              <Play className={cn("size-4", testingChatTokens.has(account.access_token) ? "animate-pulse" : "")} />
+                            </button>
+                            <span
+                              title={
+                                chatTestStatus === "测试失败"
+                                  ? account.chat_test_error || "上游暂时无法判断账号可用性"
+                                  : "快速测试状态：固定最小问题的结果；不会改变 Plus 试用或自动续期标识。"
+                              }
+                              className={cn(
+                                "inline-flex min-w-[4.75rem] items-center justify-center rounded-md border px-1.5 py-1 text-[11px] font-medium",
+                                chatTestStatusClass,
+                              )}
+                            >
+                              {testingChatTokens.has(account.access_token) ? "快：检测中" : `快：${chatTestStatus}`}
+                            </span>
+                            <button
+                              type="button"
+                              title="真实对话：发送一条随机短问题并保留在该 ChatGPT 账号历史中。"
+                              aria-label="真实对话测试账号可用性"
+                              className="rounded-lg p-2 text-sky-600 transition hover:bg-sky-50 hover:text-sky-700"
+                              onClick={() => void handleTestRealChat([account.access_token])}
+                              disabled={testingChatTokens.has(account.access_token) || testingRealChatTokens.has(account.access_token)}
+                            >
+                              <MessageCircle className={cn("size-4", testingRealChatTokens.has(account.access_token) ? "animate-pulse" : "")} />
+                            </button>
+                            <span
+                              title={
+                                realChatTestStatus === "测试失败"
+                                  ? account.real_chat_test_error || "上游暂时无法判断账号可用性"
+                                  : account.real_chat_test_prompt
+                                    ? `真实对话状态：${account.real_chat_test_prompt}`
+                                    : "真实对话状态：随机短问题会保留在 ChatGPT 历史中，不会改变 Plus 试用或自动续期标识。"
+                              }
+                              className={cn(
+                                "inline-flex min-w-[4.75rem] items-center justify-center rounded-md border px-1.5 py-1 text-[11px] font-medium",
+                                realChatTestStatusClass,
+                              )}
+                            >
+                              {testingRealChatTokens.has(account.access_token) ? "真：对话中" : `真：${realChatTestStatus}`}
+                            </span>
+                            {account.real_chat_test_conversation_url ? (
+                              <a
+                                href={account.real_chat_test_conversation_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="打开最近一次保留的真实测试对话"
+                                aria-label="打开最近一次真实测试对话"
+                                className="rounded-lg p-2 text-sky-600 transition hover:bg-sky-50 hover:text-sky-700"
+                              >
+                                <ExternalLink className="size-4" />
+                              </a>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5 text-stone-400">
                             <button
                               type="button"
                               className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"

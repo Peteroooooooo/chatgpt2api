@@ -40,6 +40,18 @@ export type Account = {
   last_relogin_at?: string | null;
   last_relogin_error?: string | null;
   relogin_fail_count?: number;
+  has_auto_renewal?: boolean;
+  has_plus_promo?: boolean;
+  promo_title?: string | null;
+  promo_checked_at?: string | null;
+  chat_test_status?: "未测试" | "可用" | "不可用" | "测试失败";
+  chat_test_checked_at?: string | null;
+  chat_test_error?: string | null;
+  real_chat_test_status?: "未测试" | "可用" | "不可用" | "测试失败";
+  real_chat_test_checked_at?: string | null;
+  real_chat_test_error?: string | null;
+  real_chat_test_prompt?: string | null;
+  real_chat_test_conversation_url?: string | null;
 };
 
 export type AccountImportPayload = {
@@ -74,6 +86,7 @@ type AccountMutationResponse = {
   items: Account[];
   added?: number;
   skipped?: number;
+  merged?: number;
   removed?: number;
   refreshed?: number;
   relogined?: number;
@@ -100,6 +113,49 @@ export type RefreshProgressResponse = {
 
 type AccountUpdateResponse = {
   item: Account;
+  items: Account[];
+};
+
+export type PlusTrialEligibilityResult = {
+  access_token: string;
+  eligible: boolean | null;
+  promo_title: string;
+  checked_at: string | null;
+  error: string | null;
+};
+
+type PlusTrialEligibilityResponse = {
+  results: PlusTrialEligibilityResult[];
+  items: Account[];
+};
+
+export type ChatUsabilityResult = {
+  access_token: string;
+  usable: boolean | null;
+  status: "未测试" | "可用" | "不可用" | "测试失败";
+  checked_at: string | null;
+  error: string | null;
+};
+
+type ChatUsabilityResponse = {
+  results: ChatUsabilityResult[];
+  items: Account[];
+};
+
+export type RealChatTestResult = {
+  access_token: string;
+  usable: boolean | null;
+  status: "未测试" | "可用" | "不可用" | "测试失败";
+  checked_at: string | null;
+  error: string | null;
+  prompt_id: string | null;
+  prompt: string | null;
+  conversation_id: string | null;
+  conversation_url: string | null;
+};
+
+type RealChatTestResponse = {
+  results: RealChatTestResult[];
   items: Account[];
 };
 
@@ -336,6 +392,27 @@ export async function login(authKey: string) {
 
 export async function fetchAccounts() {
   return httpRequest<AccountListResponse>("/api/accounts");
+}
+
+export async function checkPlusTrialEligibility(accessTokens: string[]) {
+  return httpRequest<PlusTrialEligibilityResponse>("/api/accounts/plus-trial-eligibility", {
+    method: "POST",
+    body: { access_tokens: accessTokens },
+  });
+}
+
+export async function testChatUsability(accessTokens: string[]) {
+  return httpRequest<ChatUsabilityResponse>("/api/accounts/chat-usability", {
+    method: "POST",
+    body: { access_tokens: accessTokens },
+  });
+}
+
+export async function testRealChat(accessTokens: string[]) {
+  return httpRequest<RealChatTestResponse>("/api/accounts/real-chat-test", {
+    method: "POST",
+    body: { access_tokens: accessTokens },
+  });
 }
 
 export async function fetchModels() {

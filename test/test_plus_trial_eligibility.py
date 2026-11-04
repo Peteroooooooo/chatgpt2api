@@ -1,0 +1,488 @@
+from __future__ import annotations
+
+import unittest
+from typing import Any
+from unittest.mock import patch
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from api.accounts import _account_view, create_router
+from services.account_service import AccountService
+from services.openai_backend_api import OpenAIBackendAPI
+from services.real_chat_test_prompts import (
+    REAL_CHAT_TEST_PROMPTS,
+    RealChatTestPrompt,
+    choose_real_chat_test_prompt,
+)
+
+
+class MemoryStorage:
+    def __init__(self, accounts: list[dict[str, Any]] | None = None) -> None:
+        self.accounts = list(accounts or [])
+
+    def load_accounts(self) -> list[dict[str, Any]]:
+        return list(self.accounts)
+
+    def save_accounts(self, accounts: list[dict[str, Any]]) -> None:
+        self.accounts = list(accounts)
+
+    def load_auth_keys(self) -> list[dict[str, Any]]:
+        return []
+
+    def save_auth_keys(self, auth_keys: list[dict[str, Any]]) -> None:
+        pass
+
+    def health_check(self) -> dict[str, Any]:
+        return {"ok": True}
+
+    def get_backend_info(self) -> dict[str, Any]:
+        return {"type": "memory"}
+
+
+class FakeResponse:
+    def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class FakeSession:
+    def __init__(self, response: FakeResponse) -> None:
+        self.response = response
+
+    def get(self, *args: Any, **kwargs: Any) -> FakeResponse:
+        return self.response
+
+
+def make_backend(payload: dict[str, Any]) -> OpenAIBackendAPI:
+    backend = object.__new__(OpenAIBackendAPI)
+    backend.access_token = "test-token"
+    backend.base_url = "https://chatgpt.com"
+    backend.session = FakeSession(FakeResponse(payload))
+    backend._headers = lambda *args, **kwargs: {}
+    return backend
+
+
+class PlusTrialEligibilityParsingTests(unittest.TestCase):
+    def test_parses_eligible_plus_campaign(self) -> None:
+        backend = make_backend(
+            {
+                "accounts": {
+                    "default": {
+                        "eligible_promo_campaigns": {
+                            "plus": {"metadata": {"title": "One month free"}}
+                        }
+                    }
+                }
+            }
+        )
+
+        result = backend.get_plus_trial_eligibility()
+
+        self.assertEqual(result, {"eligible": True, "title": "One month free"})
+
+    def test_parses_empty_campaigns_as_ineligible(self) -> None:
+        backend = make_backend(
+            {"accounts": {"default": {"eligible_promo_campaigns": {}}}}
+        )
+
+        result = backend.get_plus_trial_eligibility()
+
+        self.assertEqual(result, {"eligible": False, "title": ""})
+
+    def test_missing_campaigns_is_detection_failure(self) -> None:
+        backend = make_backend({"accounts": {"default": {}}})
+
+        with self.assertRaisesRegex(RuntimeError, "missing eligible_promo_campaigns"):
+            backend.get_plus_trial_eligibility()
+
+
+class ConversationPersistenceTests(unittest.TestCase):
+    def test_real_chat_payload_keeps_history_but_quick_payload_does_not(self) -> None:
+        backend = object.__new__(OpenAIBackendAPI)
+        backend._api_messages_to_conversation_messages = lambda messages: messages
+
+        quick_payload = backend._conversation_payload(
+            [{"role": "user", "content": "quick"}],
+            "auto",
+            "Asia/Shanghai",
+        )
+        real_payload = backend._conversation_payload(
+            [{"role": "user", "content": "real"}],
+            "auto",
+            "Asia/Shanghai",
+            persist_conversation=True,
+        )
+
+        self.assertTrue(quick_payload["history_and_training_disabled"])
+        self.assertFalse(real_payload["history_and_training_disabled"])
+
+
+class RealChatTestPromptTests(unittest.TestCase):
+    def test_prompt_picker_avoids_recent_prompts_when_alternatives_exist(self) -> None:
+        recent_ids = [item.id for item in REAL_CHAT_TEST_PROMPTS[:8]]
+
+        picked = choose_real_chat_test_prompt(recent_ids)
+
+        self.assertNotIn(picked.id, recent_ids)
+
+    def test_prompt_picker_falls_back_when_every_prompt_is_recent(self) -> None:
+        all_ids = [item.id for item in REAL_CHAT_TEST_PROMPTS]
+
+        picked = choose_real_chat_test_prompt(all_ids)
+
+        self.assertIn(picked, REAL_CHAT_TEST_PROMPTS)
+
+
+class PlusTrialEligibilityPersistenceTests(unittest.TestCase):
+    def test_successful_check_updates_only_promo_fields(self) -> None:
+        storage = MemoryStorage(
+            [
+                {
+                    "access_token": "test-token",
+                    "sessionToken": "session-secret",
+                    "has_plus_promo": False,
+                    "promo_title": "",
+                }
+            ]
+        )
+        service = AccountService(storage)
+
+        with patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class:
+            backend_class.return_value.get_plus_trial_eligibility.return_value = {
+                "eligible": True,
+                "title": "One month free",
+            }
+            result = service.check_plus_trial_eligibility("test-token")
+
+        account = service.get_account("test-token")
+        self.assertTrue(result["eligible"])
+        self.assertEqual(account["session_token"], "session-secret")
+        self.assertNotIn("sessionToken", account)
+        self.assertTrue(account["has_plus_promo"])
+        self.assertEqual(account["promo_title"], "One month free")
+
+    def test_failed_check_preserves_last_confirmed_result(self) -> None:
+        storage = MemoryStorage(
+            [
+                {
+                    "access_token": "test-token",
+                    "refresh_token": "refresh-secret",
+                    "has_plus_promo": True,
+                    "promo_title": "Confirmed title",
+                }
+            ]
+        )
+        service = AccountService(storage)
+
+        with patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class:
+            backend_class.return_value.get_plus_trial_eligibility.side_effect = TimeoutError(
+                "upstream timeout"
+            )
+            with self.assertRaises(TimeoutError):
+                service.check_plus_trial_eligibility("test-token")
+
+        account = service.get_account("test-token")
+        self.assertTrue(account["has_plus_promo"])
+        self.assertEqual(account["promo_title"], "Confirmed title")
+        backend_class.return_value.close.assert_called_once()
+
+    def test_chat_usability_test_persists_independent_status(self) -> None:
+        storage = MemoryStorage(
+            [
+                {
+                    "access_token": "test-token",
+                    "has_plus_promo": True,
+                    "promo_title": "Confirmed title",
+                    "chat_test_status": "未测试",
+                }
+            ]
+        )
+        service = AccountService(storage)
+
+        with (
+            patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class,
+            patch("services.protocol.conversation.conversation_events", return_value=iter([
+                {"type": "conversation.delta", "conversation_id": "conversation-1", "text": "OK"},
+                {"type": "conversation.done", "conversation_id": "conversation-1", "text": "OK"},
+            ])),
+        ):
+            result = service.test_chat_usability("test-token")
+
+        account = service.get_account("test-token")
+        self.assertEqual(result["status"], "可用")
+        self.assertTrue(result["usable"])
+        self.assertEqual(account["chat_test_status"], "可用")
+        self.assertTrue(account["has_plus_promo"])
+        self.assertEqual(account["promo_title"], "Confirmed title")
+        backend_class.return_value.delete_conversation.assert_called_once_with("conversation-1")
+        backend_class.return_value.close.assert_called_once()
+
+    def test_chat_usability_failure_is_not_reported_as_usable(self) -> None:
+        storage = MemoryStorage(
+            [
+                {
+                    "access_token": "test-token",
+                    "has_plus_promo": True,
+                    "promo_title": "Confirmed title",
+                    "chat_test_status": "可用",
+                }
+            ]
+        )
+        service = AccountService(storage)
+
+        with (
+            patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class,
+            patch(
+                "services.protocol.conversation.conversation_events",
+                side_effect=TimeoutError("upstream timeout"),
+            ),
+        ):
+            result = service.test_chat_usability("test-token")
+
+        account = service.get_account("test-token")
+        self.assertEqual(result["status"], "测试失败")
+        self.assertIsNone(result["usable"])
+        self.assertEqual(account["chat_test_status"], "测试失败")
+        self.assertTrue(account["has_plus_promo"])
+        self.assertEqual(account["promo_title"], "Confirmed title")
+        backend_class.return_value.close.assert_called_once()
+
+    def test_real_chat_test_keeps_conversation_and_persists_separate_status(self) -> None:
+        storage = MemoryStorage(
+            [
+                {
+                    "access_token": "test-token",
+                    "has_plus_promo": True,
+                    "promo_title": "Confirmed title",
+                    "chat_test_status": "可用",
+                    "real_chat_test_prompt_history": ["basic-01"],
+                }
+            ]
+        )
+        service = AccountService(storage)
+        prompt = RealChatTestPrompt("math-01", "请计算 17 × 6，并只给出结果。")
+
+        with (
+            patch("services.account_service.choose_real_chat_test_prompt", return_value=prompt),
+            patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class,
+            patch("services.protocol.conversation.conversation_events", return_value=iter([
+                {"type": "conversation.delta", "conversation_id": "conversation-real-1", "text": "102"},
+                {"type": "conversation.done", "conversation_id": "conversation-real-1", "text": "102"},
+            ])) as events,
+        ):
+            result = service.test_real_chat("test-token")
+
+        account = service.get_account("test-token")
+        self.assertEqual(result["status"], "可用")
+        self.assertTrue(result["usable"])
+        self.assertEqual(result["prompt"], prompt.text)
+        self.assertEqual(result["conversation_id"], "conversation-real-1")
+        self.assertEqual(result["conversation_url"], "https://chatgpt.com/c/conversation-real-1")
+        self.assertEqual(account["chat_test_status"], "可用")
+        self.assertEqual(account["real_chat_test_status"], "可用")
+        self.assertEqual(account["real_chat_test_prompt"], prompt.text)
+        self.assertEqual(account["real_chat_test_prompt_history"], ["basic-01", "math-01"])
+        self.assertEqual(account["real_chat_test_conversation_id"], "conversation-real-1")
+        self.assertTrue(account["has_plus_promo"])
+        self.assertEqual(account["promo_title"], "Confirmed title")
+        events.assert_called_once()
+        self.assertTrue(events.call_args.kwargs["persist_conversation"])
+        backend_class.return_value.delete_conversation.assert_not_called()
+        backend_class.return_value.close.assert_called_once()
+
+    def test_real_chat_link_is_derived_from_a_safe_conversation_id(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {
+                        "access_token": "test-token",
+                        "real_chat_test_conversation_id": "conversation-safe_1",
+                        "real_chat_test_conversation_url": "https://example.invalid/not-used",
+                    }
+                ]
+            )
+        )
+
+        account = service.get_account("test-token")
+
+        self.assertEqual(account["real_chat_test_conversation_id"], "conversation-safe_1")
+        self.assertEqual(
+            account["real_chat_test_conversation_url"],
+            "https://chatgpt.com/c/conversation-safe_1",
+        )
+
+    def test_account_view_exposes_indicator_without_renewal_secrets(self) -> None:
+        view = _account_view(
+            {
+                "access_token": "test-token",
+                "password": "password-secret",
+                "refresh_token": "refresh-secret",
+                "session_token": "session-secret",
+                "real_chat_test_prompt_history": ["basic-01"],
+                "real_chat_test_conversation_id": "conversation-private",
+                "real_chat_test_conversation_url": "https://chatgpt.com/c/conversation-private",
+            }
+        )
+
+        self.assertTrue(view["has_auto_renewal"])
+        self.assertNotIn("password", view)
+        self.assertNotIn("refresh_token", view)
+        self.assertNotIn("session_token", view)
+        self.assertNotIn("real_chat_test_prompt_history", view)
+        self.assertNotIn("real_chat_test_conversation_id", view)
+        self.assertEqual(view["real_chat_test_conversation_url"], "https://chatgpt.com/c/conversation-private")
+
+    def test_session_import_payload_adds_renewal_credential_to_existing_account(self) -> None:
+        service = AccountService(MemoryStorage([{"access_token": "test-token"}]))
+
+        result = service.add_account_items(
+            [{"access_token": "test-token", "session_token": "session-secret"}]
+        )
+
+        account = service.get_account("test-token")
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(account["session_token"], "session-secret")
+        self.assertTrue(_account_view(account)["has_auto_renewal"])
+
+    def test_session_import_merges_rotated_token_for_same_user(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {
+                        "access_token": "old-token",
+                        "user_id": "user-123",
+                        "email": "person@example.com",
+                        "quota": 9,
+                        "success": 4,
+                        "has_plus_promo": True,
+                        "promo_title": "Confirmed trial",
+                        "chat_test_status": "可用",
+                        "created_at": "2025-01-02 03:04:05",
+                    }
+                ]
+            )
+        )
+
+        result = service.add_account_items(
+            [
+                {
+                    "access_token": "rotated-token",
+                    "session_token": "new-session-secret",
+                    "user_id": "user-123",
+                    "email": "person@example.com",
+                    "merge_by_user_id": True,
+                }
+            ]
+        )
+
+        accounts = service.list_accounts()
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["merged"], 1)
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["access_token"], "rotated-token")
+        self.assertEqual(accounts[0]["session_token"], "new-session-secret")
+        self.assertEqual(accounts[0]["quota"], 9)
+        self.assertTrue(accounts[0]["has_plus_promo"])
+        self.assertEqual(accounts[0]["promo_title"], "Confirmed trial")
+        self.assertEqual(accounts[0]["chat_test_status"], "可用")
+        self.assertTrue(_account_view(accounts[0])["has_auto_renewal"])
+
+    def test_same_user_id_is_not_merged_without_session_import_marker(self) -> None:
+        service = AccountService(
+            MemoryStorage([{"access_token": "old-token", "user_id": "user-123"}])
+        )
+
+        result = service.add_account_items(
+            [{"access_token": "second-token", "user_id": "user-123"}]
+        )
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["merged"], 0)
+        self.assertEqual(len(service.list_accounts()), 2)
+
+    def test_session_reimport_consolidates_existing_same_user_duplicate(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {
+                        "access_token": "old-token",
+                        "user_id": "user-123",
+                        "quota": 7,
+                        "has_plus_promo": True,
+                    },
+                    {
+                        "access_token": "rotated-token",
+                        "user_id": "user-123",
+                        "session_token": "previous-session-secret",
+                        "refresh_token": "refresh-secret",
+                    },
+                ]
+            )
+        )
+
+        result = service.add_account_items(
+            [
+                {
+                    "access_token": "rotated-token",
+                    "session_token": "new-session-secret",
+                    "user_id": "user-123",
+                    "merge_by_user_id": True,
+                }
+            ]
+        )
+
+        accounts = service.list_accounts()
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["merged"], 1)
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["access_token"], "rotated-token")
+        self.assertEqual(accounts[0]["session_token"], "new-session-secret")
+        self.assertEqual(accounts[0]["refresh_token"], "refresh-secret")
+        self.assertEqual(accounts[0]["quota"], 7)
+        self.assertTrue(accounts[0]["has_plus_promo"])
+
+
+class AccountRouteAuthenticationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        app = FastAPI()
+        app.include_router(create_router())
+        self.client = TestClient(app)
+
+    def test_account_list_rejects_unauthenticated_requests(self) -> None:
+        response = self.client.get("/api/accounts")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_eligibility_check_rejects_unauthenticated_requests(self) -> None:
+        response = self.client.post(
+            "/api/accounts/plus-trial-eligibility",
+            json={"access_tokens": ["test-token"]},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_chat_usability_check_rejects_unauthenticated_requests(self) -> None:
+        response = self.client.post(
+            "/api/accounts/chat-usability",
+            json={"access_tokens": ["test-token"]},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_real_chat_test_rejects_unauthenticated_requests(self) -> None:
+        response = self.client.post(
+            "/api/accounts/real-chat-test",
+            json={"access_tokens": ["test-token"]},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+
+if __name__ == "__main__":
+    unittest.main()
