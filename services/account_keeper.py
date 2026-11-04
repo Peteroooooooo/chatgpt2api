@@ -132,15 +132,24 @@ class AccountKeeper:
             entry["error"] = "account disabled"
             return entry
 
-        need_relogin = account.get("status") == "异常"
-        if not need_relogin and has_rt:
+        need_relogin = False
+        if has_rt:
             entry["actions"].append("refresh")
             token, error = self._refresh(token, account)
             if error:
                 entry["refresh_error"] = error[:300]
                 need_relogin = True
-        elif not need_relogin and not has_rt:
-            need_relogin = self._needs_relogin_without_rt(account, int(settings["relogin_when_access_token_expires_within_hours"]))
+            else:
+                entry["actions"].append("verify")
+                self.accounts.refresh_accounts([token], defer_invalid_removal=True)
+                token = self.accounts.resolve_access_token(token)
+                if (self.accounts.get_account(token) or {}).get("status") == "异常":
+                    entry["refresh_error"] = "renewed token still rejected by ChatGPT"
+                    need_relogin = True
+        else:
+            need_relogin = account.get("status") == "异常" or self._needs_relogin_without_rt(
+                account, int(settings["relogin_when_access_token_expires_within_hours"])
+            )
 
         if need_relogin:
             if not has_password or not email:
