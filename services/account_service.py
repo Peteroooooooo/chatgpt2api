@@ -746,12 +746,10 @@ class AccountService:
         platform_oauth_redirect_uri = "https://platform.openai.com/auth/callback"
         user_agent = self._OAUTH_USER_AGENT
         
-        # 创建 session
-        session_kwargs = {"impersonate": "chrome110", "verify": False}
-        proxy = config.get_proxy_settings()
-        if proxy:
-            session_kwargs["proxy"] = proxy
-        session = requests.Session(**session_kwargs)
+        # 创建 session（与上游请求走同一出口：账号代理 > 运行时代理 > 全局代理）
+        from services.proxy_service import proxy_settings
+
+        session = requests.Session(**proxy_settings.build_session_kwargs(impersonate="chrome110", verify=False, upstream=True))
         
         try:
             device_id = str(uuid.uuid4())
