@@ -1,0 +1,130 @@
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from services.account_keeper import AccountKeeper
+from services.account_service import AccountService
+from test.test_account_export import MemoryStorage, make_jwt
+
+
+def token(name: str, expires_in: int = 9 * 86400) -> str:
+    return make_jwt({"exp": int(time.time()) + expires_in, "iat": int(time.time()), "n": name})
+
+
+class PatrolService(AccountService):
+    """AccountService with OpenAI calls replaced."""
+
+    def __init__(self, accounts, refresh_ok=True, login_ok=True):
+        super().__init__(MemoryStorage(accounts))
+        self.refresh_ok = refresh_ok
+        self.login_ok = login_ok
+        self.logins: list[str] = []
+
+    def _request_access_token_refresh(self, refresh_token, account=None):
+        if not self.refresh_ok:
+            raise RuntimeError("oauth_refresh_http_401: app_session_terminated")
+        return {"access_token": token("refreshed-" + refresh_token), "refresh_token": refresh_token + "+", "id_token": ""}
+
+    def _login_with_password(self, email, password):
+        self.logins.append(email)
+        if not self.login_ok:
+            return {"ok": False, "error": "otp_not_received"}
+        return {"ok": True, "email": email, "access_token": token("login-" + email), "refresh_token": "rt-new", "id_token": ""}
+
+    def refresh_accounts(self, access_tokens, progress_id=None, defer_invalid_removal=True):
+        return {"refreshed": 0, "errors": [], "items": self.list_accounts(), "relogined": 0}
+
+
+class KeeperTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.settings_file = root / "keeper.json"
+        self.patrol_dir = root / "patrol"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def keeper(self, service):
+        keeper = AccountKeeper(service, self.settings_file, self.patrol_dir)
+        keeper._sleep = lambda _: None
+        return keeper
+
+    def test_refresh_ok_and_failed_refresh_relogs_in(self):
+        good = {"access_token": token("a"), "refresh_token": "rt-a", "email": "a@040601.com", "password": "p"}
+        service = PatrolService([good])
+        summary = self.keeper(service).run_patrol("test")
+        self.assertEqual(summary["counts"], {"ok": 1})
+        self.assertEqual(service.logins, [])
+
+        service = PatrolService([dict(good)], refresh_ok=False)
+        keeper = self.keeper(service)
+        summary = keeper.run_patrol("test")
+        self.assertEqual(summary["counts"], {"relogged_in": 1})
+        account = service.get_account(service.find_token_by_email("a@040601.com"))
+        self.assertEqual(account["refresh_token"], "rt-new")
+        self.assertEqual(account["status"], "正常")
+        run = keeper.get_run(summary["id"])
+        self.assertEqual(run["entries"][0]["actions"], ["refresh", "relogin"])
+
+    def test_failed_relogin_keeps_account_and_password(self):
+        service = PatrolService(
+            [{"access_token": token("b"), "refresh_token": "rt-b", "email": "b@peter.com", "password": "p", "status": "异常"}],
+            login_ok=False,
+        )
+        summary = self.keeper(service).run_patrol("test")
+        self.assertEqual(summary["counts"], {"relogin_failed": 1})
+        account = service.get_account(service.list_tokens()[0])
+        self.assertEqual(account["password"], "p")
+        self.assertEqual(account["status"], "异常")
+        self.assertEqual(account["relogin_fail_count"], 1)
+        self.assertEqual(account["last_relogin_error"], "otp_not_received")
+
+    def test_auto_relogin_cooldown_but_patrol_forces(self):
+        service = PatrolService([{"access_token": token("c"), "email": "c@duck.com", "password": "p"}], login_ok=False)
+        tok = service.list_tokens()[0]
+        service._password_re_login_thread(tok, "c@duck.com", "p", "refresh_token_keepalive")
+        service._password_re_login_thread(tok, "c@duck.com", "p", "refresh_token_keepalive")
+        self.assertEqual(len(service.logins), 1)
+        service._password_re_login_thread(tok, "c@duck.com", "p", "patrol")
+        self.assertEqual(len(service.logins), 2)
+
+    def test_access_token_only_account(self):
+        service = PatrolService([
+            {"access_token": token("d", expires_in=3600), "email": "d@x.com", "password": "p"},
+            {"access_token": token("e", expires_in=3600), "email": "e@x.com"},
+            {"access_token": token("f"), "email": "f@x.com", "password": "p"},
+        ])
+        summary = self.keeper(service).run_patrol("test")
+        self.assertEqual(summary["counts"], {"relogged_in": 1, "needs_manual": 1, "ok": 1})
+        self.assertEqual(service.logins, ["d@x.com"])
+
+    def test_parse_credentials(self):
+        text = "a@x.com----p:w1\nb@y.com:pw2\n# skip\nbad line\nc@z.com\tpw 3\na@x.com----dup"
+        self.assertEqual(
+            AccountKeeper.parse_credentials(text),
+            [("a@x.com", "p:w1"), ("b@y.com", "pw2"), ("c@z.com", "pw 3")],
+        )
+
+    def test_login_and_add_new_account(self):
+        service = PatrolService([])
+        result = service.login_and_add_account("new@040601.com", "pw")
+        self.assertTrue(result["ok"])
+        account = service.get_account(service.find_token_by_email("new@040601.com"))
+        self.assertEqual(account["password"], "pw")
+        self.assertEqual(account["refresh_token"], "rt-new")
+
+    def test_runs_are_trimmed(self):
+        service = PatrolService([])
+        keeper = self.keeper(service)
+        keeper.update_settings({"keep_runs": 2})
+        ids = []
+        for _ in range(3):
+            ids.append(keeper.run_patrol("test")["id"])
+            time.sleep(1.01)
+        self.assertEqual([run["id"] for run in keeper.list_runs()], ids[:0:-1])
+
+
+if __name__ == "__main__":
+    unittest.main()

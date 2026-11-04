@@ -37,6 +37,9 @@ export type Account = {
   image_inflight?: number;
   last_used_at?: string | null;
   proxy?: string | null;
+  last_relogin_at?: string | null;
+  last_relogin_error?: string | null;
+  relogin_fail_count?: number;
 };
 
 export type AccountImportPayload = {
@@ -923,4 +926,162 @@ export async function testProxyClearance(targetUrl?: string) {
     method: "POST",
     body: { target_url: targetUrl ?? "https://chatgpt.com" },
   });
+}
+
+// ── Keeper: mailbox routing / patrol / password import ─────────────
+
+export type MailboxKind = "cloudflare_temp_email" | "gmail_api" | "imap";
+
+/** 保存在后端的单个邮箱配置；密钥字段回读时为空字符串，并附带 has_<字段>。 */
+export type MailboxProviderSettings = {
+  kind: MailboxKind;
+  require_recipient_match?: boolean;
+  [key: string]: unknown;
+};
+
+export type MailboxRoute = {
+  match: string;
+  provider: string;
+};
+
+export type MailboxSettings = {
+  providers: Record<string, MailboxProviderSettings>;
+  routes: MailboxRoute[];
+  otp_timeout_seconds: number;
+  poll_interval_seconds: number;
+};
+
+export type MailboxTestResult = {
+  ok: boolean;
+  error?: string;
+  [key: string]: unknown;
+};
+
+export type MailboxResolveResult = {
+  email: string;
+  mailbox: string | null;
+  kind?: string | null;
+  error?: string;
+};
+
+export async function fetchMailboxSettings() {
+  return httpRequest<MailboxSettings>("/api/keeper/mailboxes");
+}
+
+export async function saveMailboxSettings(settings: MailboxSettings) {
+  return httpRequest<MailboxSettings>("/api/keeper/mailboxes", {
+    method: "POST",
+    body: settings,
+  });
+}
+
+export async function testMailbox(name: string) {
+  return httpRequest<MailboxTestResult>(`/api/keeper/mailboxes/${encodeURIComponent(name)}/test`, {
+    method: "POST",
+  });
+}
+
+export async function resolveMailbox(email: string) {
+  return httpRequest<MailboxResolveResult>("/api/keeper/mailboxes/resolve", {
+    method: "POST",
+    body: { email },
+  });
+}
+
+export type KeeperSettings = {
+  patrol_enabled: boolean;
+  patrol_time: string;
+  relogin_delay_min_seconds: number;
+  relogin_delay_max_seconds: number;
+  relogin_when_access_token_expires_within_hours: number;
+  keep_runs: number;
+};
+
+export type KeeperSettingsResponse = KeeperSettings & {
+  next_run_at: string;
+};
+
+export type PatrolResult = "ok" | "relogged_in" | "relogin_failed" | "needs_manual" | "skipped" | "error";
+
+export type PatrolRun = {
+  id: string;
+  trigger: string;
+  state: "running" | "finished" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  total: number;
+  done: number;
+  counts: Partial<Record<PatrolResult, number>>;
+  error?: string;
+};
+
+export type PatrolEntry = {
+  at: string;
+  email?: string;
+  token: string;
+  status_before?: string | null;
+  status_after?: string | null;
+  actions?: Array<"refresh" | "relogin">;
+  result: PatrolResult;
+  error?: string;
+  refresh_error?: string;
+  has_refresh_token?: boolean;
+  has_password?: boolean;
+};
+
+export type PatrolRunDetail = PatrolRun & {
+  entries: PatrolEntry[];
+};
+
+export async function fetchKeeperSettings() {
+  return httpRequest<KeeperSettingsResponse>("/api/keeper/settings");
+}
+
+export async function saveKeeperSettings(settings: Partial<KeeperSettings>) {
+  return httpRequest<KeeperSettingsResponse>("/api/keeper/settings", {
+    method: "POST",
+    body: settings,
+  });
+}
+
+export async function runPatrolNow() {
+  return httpRequest<Partial<PatrolRun> & { state: string }>("/api/keeper/patrol/run", {
+    method: "POST",
+  });
+}
+
+export async function fetchPatrolRuns() {
+  return httpRequest<{ items: PatrolRun[] }>("/api/keeper/patrol/runs");
+}
+
+export async function fetchPatrolRun(runId: string) {
+  return httpRequest<PatrolRunDetail>(`/api/keeper/patrol/runs/${encodeURIComponent(runId)}`);
+}
+
+export type PasswordImportItem = {
+  ok: boolean;
+  email: string;
+  error?: string | null;
+  added?: boolean;
+  updated?: boolean;
+  detail?: string;
+};
+
+export type PasswordImportJob = {
+  id: string;
+  state: "running" | "finished";
+  total: number;
+  done: number;
+  items: PasswordImportItem[];
+};
+
+export async function startPasswordImport(text: string) {
+  return httpRequest<PasswordImportJob>("/api/keeper/import-passwords", {
+    method: "POST",
+    body: { text },
+  });
+}
+
+export async function fetchKeeperJob(jobId: string) {
+  return httpRequest<PasswordImportJob>(`/api/keeper/jobs/${encodeURIComponent(jobId)}`);
 }

@@ -470,8 +470,51 @@ class AccountService:
                 return active_token
             return self._apply_refreshed_tokens(active_token, token_data, event)
 
+    _RELOGIN_RETRY_COOLDOWN_SECONDS = 6 * 60 * 60
+    _RELOGIN_FORCED_EVENTS = {"manual_relogin", "patrol"}
+    _relogin_inflight: set[str] = set()
+    _relogin_inflight_lock = Lock()
+
+    def _relogin_allowed(self, access_token: str, event: str) -> bool:
+        if event in self._RELOGIN_FORCED_EVENTS:
+            return True
+        account = self.get_account(access_token) or {}
+        if not int(account.get("relogin_fail_count") or 0):
+            return True
+        last = self._parse_time(account.get("last_relogin_at"))
+        return last is None or (datetime.now(timezone.utc) - last).total_seconds() >= self._RELOGIN_RETRY_COOLDOWN_SECONDS
+
+    def _mark_relogin_failed(self, access_token: str, error: str) -> None:
+        """Keep the account (and its stored password) so a later patrol can retry."""
+        account = self.get_account(access_token) or {}
+        self.update_account(access_token, {
+            "status": "异常",
+            "quota": 0,
+            "last_relogin_at": datetime.now(timezone.utc).isoformat(),
+            "last_relogin_error": str(error or "unknown")[:300],
+            "relogin_fail_count": int(account.get("relogin_fail_count") or 0) + 1,
+        }, quiet=True)
+
     def _password_re_login_thread(self, access_token: str, email: str, password: str, event: str, progress_id: str | None = None) -> None:
-        """密码重新登录线程入口"""
+        """密码重新登录线程入口：同一邮箱同时只跑一个登录，自动触发的失败重试有冷却。"""
+        key = str(email or "").strip().lower()
+        if not self._relogin_allowed(access_token, event):
+            if progress_id:
+                self.update_relogin_progress(progress_id, access_token, "跳过", "上次重登失败，冷却中")
+            return
+        with self._relogin_inflight_lock:
+            if key in self._relogin_inflight:
+                if progress_id:
+                    self.update_relogin_progress(progress_id, access_token, "跳过", "该邮箱正在登录")
+                return
+            self._relogin_inflight.add(key)
+        try:
+            self._password_re_login_body(access_token, email, password, event, progress_id)
+        finally:
+            with self._relogin_inflight_lock:
+                self._relogin_inflight.discard(key)
+
+    def _password_re_login_body(self, access_token: str, email: str, password: str, event: str, progress_id: str | None = None) -> None:
         try:
             result = self._login_with_password(email, password)
             if result.get("ok"):
@@ -495,6 +538,9 @@ class AccountService:
                 self.update_account(new_token, {
                     "source_type": result.get("source_type", "password"),
                     "status": "正常",
+                    "last_relogin_at": datetime.now(timezone.utc).isoformat(),
+                    "last_relogin_error": None,
+                    "relogin_fail_count": 0,
                 }, quiet=True)
 
                 log_service.add(
@@ -545,7 +591,7 @@ class AccountService:
                             self.update_relogin_progress(progress_id, access_token, "禁用")
                     else:
                         # 永久故障：将账号标记为异常（或自动移除）
-                        self.remove_invalid_token(access_token, f"{event}:password_relogin_failed", quiet=True)
+                        self._mark_relogin_failed(access_token, error_type)
                         if progress_id:
                             self.update_relogin_progress(progress_id, access_token, "异常", error_type)
                 else:
@@ -562,7 +608,7 @@ class AccountService:
                         },
                     )
                     # 永久故障：将账号标记为异常（或自动移除）
-                    self.remove_invalid_token(access_token, f"{event}:password_relogin_failed", quiet=True)
+                    self._mark_relogin_failed(access_token, error_type)
                     if progress_id:
                         self.update_relogin_progress(progress_id, access_token, "异常", error_type)
         except Exception as exc:
@@ -578,7 +624,7 @@ class AccountService:
                 },
             )
             # 将账号标记为异常（或自动移除）
-            self.remove_invalid_token(access_token, f"{event}:password_relogin_exception", quiet=True)
+            self._mark_relogin_failed(access_token, str(exc))
             if progress_id:
                 self.update_relogin_progress(progress_id, access_token, "异常", str(exc))
 
@@ -700,6 +746,7 @@ class AccountService:
             except Exception:
                 pass
             
+            login_started_at = datetime.now(timezone.utc)
             login_resp = session.post(
                 f"{auth_base}/api/accounts/password/verify",
                 headers=login_headers,
@@ -740,8 +787,21 @@ class AccountService:
                     page_type = str(page_info.get("type") or "")
                 
                 if page_type == "email_otp_verification":
-                    # 需要验证码才能登录，直接标记为账号异常
-                    return {"ok": False, "error": "need_verification_code", "detail": login_data}
+                    from services.login_otp import complete_email_otp
+                    from services.mailbox.service import mailbox_service
+
+                    otp_result = complete_email_otp(
+                        session, email, login_data, login_headers, login_started_at, mailbox_service
+                    )
+                    if not otp_result.get("ok"):
+                        return otp_result
+                    auth_code = str(otp_result.get("code") or "")
+                elif continue_url:
+                    from services.login_otp import follow_to_auth_code
+
+                    auth_code, last_url = follow_to_auth_code(session, continue_url, login_headers)
+                    if not auth_code:
+                        return {"ok": False, "error": "no_auth_code", "detail": {**login_data, "last_url": last_url[:300]}}
                 else:
                     return {"ok": False, "error": "no_auth_code", "detail": login_data}
             
@@ -1567,6 +1627,44 @@ class AccountService:
             self.finish_refresh_progress(progress_id, result)
 
         return result
+
+    def find_token_by_email(self, email: str) -> str:
+        target = str(email or "").strip().lower()
+        if not target:
+            return ""
+        with self._lock:
+            for token, account in self._accounts.items():
+                if str(account.get("email") or "").strip().lower() == target:
+                    return token
+        return ""
+
+    def login_and_add_account(self, email: str, password: str) -> dict:
+        """Log in with email + password (mailbox OTP if asked) and add or update the account."""
+        email = str(email or "").strip()
+        password = str(password or "").strip()
+        if not email or not password:
+            return {"ok": False, "email": email, "error": "email and password are required"}
+        existing = self.find_token_by_email(email)
+        if existing:
+            self.update_account(existing, {"password": password}, quiet=True)
+            self._password_re_login_thread(existing, email, password, "manual_relogin")
+            account = self.get_account(existing) or {}
+            ok = account.get("status") == "正常" and not account.get("last_relogin_error")
+            return {"ok": ok, "email": email, "updated": True, "error": account.get("last_relogin_error")}
+        result = self._login_with_password(email, password)
+        if not result.get("ok"):
+            return {"ok": False, "email": email, "error": result.get("error"), "detail": result.get("detail")}
+        token = str(result.get("access_token") or "")
+        self.add_account_items([{
+            "access_token": token,
+            "refresh_token": result.get("refresh_token") or "",
+            "id_token": result.get("id_token") or "",
+            "email": result.get("email") or email,
+            "password": password,
+            "source_type": "password",
+        }])
+        self.refresh_accounts([token])
+        return {"ok": True, "email": email, "added": True}
 
     def re_login_accounts(self, access_tokens: list[str], progress_id: str | None = None) -> dict[str, Any]:
         """对选中账号执行密码重新登录流程。
