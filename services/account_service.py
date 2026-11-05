@@ -734,6 +734,28 @@ class AccountService:
             if progress_id:
                 self.update_relogin_progress(progress_id, access_token, "异常", str(exc))
 
+    @staticmethod
+    def _start_passwordless_login(session, email: str, device_id: str, login_headers: dict):
+        """Submit the email on the log-in screen. For accounts without a password OpenAI
+        answers with page.type=email_otp_verification and mails a code itself."""
+        headers = {**login_headers, "referer": "https://auth.openai.com/log-in"}
+        headers.pop("openai-sentinel-token", None)
+        try:
+            from utils.sentinel import build_sentinel_token
+
+            sentinel_val, oai_sc_val = build_sentinel_token(session, device_id, "authorize_continue")
+            headers["openai-sentinel-token"] = sentinel_val
+            if oai_sc_val:
+                session.cookies.set("oai-sc", oai_sc_val, domain=".openai.com")
+        except Exception:
+            pass
+        return session.post(
+            "https://auth.openai.com/api/accounts/authorize/continue",
+            headers=headers,
+            json={"username": {"value": email, "kind": "email"}, "screen_hint": "login"},
+            timeout=30,
+        )
+
     def _login_with_password(self, email: str, password: str) -> dict:
         """通过邮箱+密码登录，返回 {access_token, refresh_token, id_token, ...}"""
         from curl_cffi import requests
@@ -851,12 +873,22 @@ class AccountService:
                 pass
             
             login_started_at = datetime.now(timezone.utc)
-            login_resp = session.post(
-                f"{auth_base}/api/accounts/password/verify",
-                headers=login_headers,
-                json={"password": password},
-                timeout=30,
-            )
+            if password:
+                login_resp = session.post(
+                    f"{auth_base}/api/accounts/password/verify",
+                    headers=login_headers,
+                    json={"password": password},
+                    timeout=30,
+                )
+            else:
+                login_resp = self._start_passwordless_login(session, email, device_id, login_headers)
+                if login_resp.status_code == 200:
+                    try:
+                        page = (login_resp.json() or {}).get("page") or {}
+                    except Exception:
+                        page = {}
+                    if str(page.get("type") or "") == "login_password":
+                        return {"ok": False, "error": "password_required", "detail": {"page": page}}
             
             login_data = {}
             try:

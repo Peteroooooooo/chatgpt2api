@@ -100,6 +100,23 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual(summary["counts"], {"relogged_in": 1, "needs_manual": 1, "ok": 1})
         self.assertEqual(service.logins, ["d@x.com"])
 
+    def test_no_password_relogs_in_with_email_code_when_mailbox_routes(self):
+        service = PatrolService([{"access_token": token("g"), "session_token": "st", "email": "g@duck.com", "status": "异常"}])
+        service.force_renew = lambda tok, event="patrol": (tok, "session_token: 401")
+        keeper = self.keeper(service)
+        keeper._mailbox_routes = lambda email: email.endswith("@duck.com")
+        summary = keeper.run_patrol("test")
+        self.assertEqual(summary["counts"], {"relogged_in": 1})
+        self.assertEqual(service.logins, ["g@duck.com"])
+        self.assertEqual(keeper.get_run(summary["id"])["entries"][0]["actions"], ["refresh", "relogin_email_code"])
+
+        keeper._mailbox_routes = lambda email: False
+        service = PatrolService([{"access_token": token("h"), "session_token": "st", "email": "h@other.com", "status": "异常"}])
+        service.force_renew = lambda tok, event="patrol": (tok, "session_token: 401")
+        keeper.accounts = service
+        self.assertEqual(keeper.run_patrol("test")["counts"], {"needs_manual": 1})
+        self.assertEqual(service.logins, [])
+
     def test_parse_credentials(self):
         text = "a@x.com----p:w1\nb@y.com:pw2\n# skip\nbad line\nc@z.com\tpw 3\na@x.com----dup"
         self.assertEqual(
