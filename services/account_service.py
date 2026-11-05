@@ -578,6 +578,16 @@ class AccountService:
     auto_relogin_enabled = True
     relogin_without_password = True
     push_auth_wait_seconds = 120
+    relogin_max_failures = 3
+    # Retrying cannot fix these; the account waits for the user after the first one.
+    RELOGIN_NEEDS_USER_ERRORS = frozenset({
+        "google_sign_in_account",
+        "invalid_password",
+        "push_auth_denied",
+        "push_auth_timeout",
+        "need_verification_code",
+        "password_required",
+    })
     _RELOGIN_FORCED_EVENTS = {"manual_relogin", "patrol"}
     _relogin_inflight: set[str] = set()
     _relogin_inflight_lock = Lock()
@@ -588,6 +598,7 @@ class AccountService:
         self.relogin_without_password = bool(settings.get("relogin_without_password", True))
         # OpenAI drops an unanswered approval prompt after about 10 minutes.
         self.push_auth_wait_seconds = min(600, max(0, int(settings.get("push_auth_wait_seconds", 120))))
+        self.relogin_max_failures = max(0, int(settings.get("relogin_max_failures", 3)))
 
     def relogin_credentials(self, account: dict) -> tuple[str, str] | None:
         """(email, password) to log in with; password is "" for an email-code login. None if impossible."""
@@ -607,25 +618,34 @@ class AccountService:
             return None
 
     def _relogin_allowed(self, access_token: str, event: str) -> bool:
+        if event == "manual_relogin":
+            return True
+        account = self.get_account(access_token) or {}
+        if account.get("relogin_paused"):
+            return False
         if event in self._RELOGIN_FORCED_EVENTS:
             return True
         if not self.auto_relogin_enabled:
             return False
-        account = self.get_account(access_token) or {}
         if not int(account.get("relogin_fail_count") or 0):
             return True
         last = self._parse_time(account.get("last_relogin_at"))
         return last is None or (datetime.now(timezone.utc) - last).total_seconds() >= self.relogin_cooldown_seconds
 
     def _mark_relogin_failed(self, access_token: str, error: str) -> None:
-        """Keep the account (and its stored password) so a later patrol can retry."""
+        """Keep the account (and its stored password). Automatic retries stop once the
+        error needs the user or temporary failures reach relogin_max_failures in a row."""
         account = self.get_account(access_token) or {}
+        error = str(error or "unknown")
+        count = int(account.get("relogin_fail_count") or 0) + 1
+        paused = error in self.RELOGIN_NEEDS_USER_ERRORS or (0 < self.relogin_max_failures <= count)
         self.update_account(access_token, {
             "status": "异常",
             "quota": 0,
             "last_relogin_at": datetime.now(timezone.utc).isoformat(),
-            "last_relogin_error": str(error or "unknown")[:300],
-            "relogin_fail_count": int(account.get("relogin_fail_count") or 0) + 1,
+            "last_relogin_error": error[:300],
+            "relogin_fail_count": count,
+            "relogin_paused": paused,
         }, quiet=True)
 
     def _password_re_login_thread(self, access_token: str, email: str, password: str, event: str, progress_id: str | None = None) -> None:
@@ -649,7 +669,9 @@ class AccountService:
 
     def _password_re_login_body(self, access_token: str, email: str, password: str, event: str, progress_id: str | None = None) -> None:
         try:
-            result = self._login_with_password(email, password)
+            # Only a relogin the user started themselves waits for the phone; they are there to tap it.
+            push_wait = self.push_auth_wait_seconds if event == "manual_relogin" else 0
+            result = self._login_with_password(email, password, push_wait)
             if result.get("ok"):
                 # 登录成功，更新账号
                 new_access_token = result.get("access_token", "")
@@ -674,6 +696,7 @@ class AccountService:
                     "last_relogin_at": datetime.now(timezone.utc).isoformat(),
                     "last_relogin_error": None,
                     "relogin_fail_count": 0,
+                    "relogin_paused": False,
                 }, quiet=True)
 
                 log_service.add(
@@ -784,7 +807,7 @@ class AccountService:
             timeout=30,
         )
 
-    def _login_with_password(self, email: str, password: str) -> dict:
+    def _login_with_password(self, email: str, password: str, push_wait_seconds: int = 0) -> dict:
         """通过邮箱+密码登录，返回 {access_token, refresh_token, id_token, ...}"""
         from curl_cffi import requests
         
@@ -976,7 +999,7 @@ class AccountService:
                         return {"openai-sentinel-token": token}
 
                     push_result = complete_push_auth(
-                        session, email, login_data, login_headers, mailbox_service, self.push_auth_wait_seconds, mfa_sentinel
+                        session, email, login_data, login_headers, mailbox_service, push_wait_seconds, mfa_sentinel
                     )
                     if not push_result.get("ok"):
                         return push_result
@@ -2153,7 +2176,7 @@ class AccountService:
             account = self.get_account(existing) or {}
             ok = account.get("status") == "正常" and not account.get("last_relogin_error")
             return {"ok": ok, "email": email, "updated": True, "error": account.get("last_relogin_error")}
-        result = self._login_with_password(email, password)
+        result = self._login_with_password(email, password, self.push_auth_wait_seconds)
         if not result.get("ok"):
             return {"ok": False, "email": email, "error": result.get("error"), "detail": result.get("detail")}
         token = str(result.get("access_token") or "")

@@ -15,12 +15,14 @@ def token(name: str, expires_in: int = 9 * 86400) -> str:
 class PatrolService(AccountService):
     """AccountService with OpenAI calls replaced."""
 
-    def __init__(self, accounts, refresh_ok=True, login_ok=True, routed_domain=None):
+    def __init__(self, accounts, refresh_ok=True, login_ok=True, routed_domain=None, login_error="otp_not_received"):
         super().__init__(MemoryStorage(accounts))
         self.refresh_ok = refresh_ok
         self.login_ok = login_ok
+        self.login_error = login_error
         self.routed_domain = routed_domain
         self.logins: list[str] = []
+        self.push_waits: list[int] = []
 
     def relogin_credentials(self, account):
         email = str(account.get("email") or "")
@@ -36,10 +38,11 @@ class PatrolService(AccountService):
             raise RuntimeError("oauth_refresh_http_401: app_session_terminated")
         return {"access_token": token("refreshed-" + refresh_token), "refresh_token": refresh_token + "+", "id_token": ""}
 
-    def _login_with_password(self, email, password):
+    def _login_with_password(self, email, password, push_wait_seconds=0):
         self.logins.append(email)
+        self.push_waits.append(push_wait_seconds)
         if not self.login_ok:
-            return {"ok": False, "error": "otp_not_received"}
+            return {"ok": False, "error": self.login_error}
         return {"ok": True, "email": email, "access_token": token("login-" + email), "refresh_token": "rt-new", "id_token": ""}
 
     def refresh_accounts(self, access_tokens, progress_id=None, defer_invalid_removal=True):
@@ -99,6 +102,54 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual(len(service.logins), 1)
         service._password_re_login_thread(tok, "c@duck.com", "p", "patrol")
         self.assertEqual(len(service.logins), 2)
+
+    def test_error_that_needs_the_user_stops_at_once(self):
+        service = PatrolService(
+            [{"access_token": token("h"), "email": "h@gmail.com", "password": "p", "status": "异常"}],
+            login_ok=False,
+            login_error="google_sign_in_account",
+        )
+        keeper = self.keeper(service)
+        self.assertEqual(keeper.run_patrol("test")["counts"], {"relogin_failed": 1})
+        tok = service.list_tokens()[0]
+        self.assertTrue(service.get_account(tok)["relogin_paused"])
+        summary = keeper.run_patrol("test")
+        self.assertEqual(summary["counts"], {"needs_manual": 1})
+        self.assertIn("google_sign_in_account", keeper.get_run(summary["id"])["entries"][0]["error"])
+        service._password_re_login_thread(tok, "h@gmail.com", "p", "refresh_token_keepalive")
+        self.assertEqual(len(service.logins), 1)
+
+        service.login_ok = True
+        service._password_re_login_thread(tok, "h@gmail.com", "p", "manual_relogin")
+        account = service.get_account(service.find_token_by_email("h@gmail.com"))
+        self.assertEqual((account["status"], account["relogin_paused"], account["relogin_fail_count"]), ("正常", False, 0))
+
+    def test_temporary_errors_stop_after_three_in_a_row(self):
+        service = PatrolService(
+            [{"access_token": token("i"), "email": "i@duck.com", "password": "p", "status": "异常"}], login_ok=False
+        )
+        keeper = self.keeper(service)
+        results = [next(iter(keeper.run_patrol("test")["counts"])) for _ in range(4)]
+        self.assertEqual(results, ["relogin_failed"] * 3 + ["needs_manual"])
+        self.assertEqual(len(service.logins), 3)
+
+    def test_zero_max_failures_keeps_retrying_temporary_errors(self):
+        service = PatrolService(
+            [{"access_token": token("j"), "email": "j@duck.com", "password": "p", "status": "异常"}], login_ok=False
+        )
+        keeper = self.keeper(service)
+        keeper.update_settings({"relogin_max_failures": 0})
+        for _ in range(4):
+            keeper.run_patrol("test")
+        self.assertEqual(len(service.logins), 4)
+
+    def test_only_manual_relogin_waits_for_phone_approval(self):
+        service = PatrolService([{"access_token": token("g"), "email": "g@duck.com", "password": "p"}], login_ok=False)
+        tok = service.list_tokens()[0]
+        for event in ("patrol", "manual_relogin", "refresh_token_keepalive"):
+            service.update_account(tok, {"relogin_fail_count": 0}, quiet=True)
+            service._password_re_login_thread(tok, "g@duck.com", "p", event)
+        self.assertEqual(service.push_waits, [0, 120, 0])
 
     def test_access_token_only_account(self):
         service = PatrolService([

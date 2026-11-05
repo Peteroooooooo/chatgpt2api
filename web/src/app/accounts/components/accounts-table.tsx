@@ -225,7 +225,7 @@ export function AccountsTable({ rows, selected, busy, actions, onToggle, onToggl
                   <StatusPill status={account.status} />
                   {account.last_relogin_error ? (
                     <span
-                      title={`重登失败${account.relogin_fail_count ? ` ${account.relogin_fail_count} 次` : ""}：${account.last_relogin_error}`}
+                      title={`${account.relogin_paused ? "已停止自动重登，需要手动处理。" : ""}重登失败${account.relogin_fail_count ? ` ${account.relogin_fail_count} 次` : ""}：${account.last_relogin_error}`}
                       className="hidden text-rose-500 sm:inline-flex"
                     >
                       <CircleAlert className="size-4" />

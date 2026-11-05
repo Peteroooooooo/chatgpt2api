@@ -66,6 +66,7 @@ type ToggleKey = "patrol_enabled" | "auto_relogin_enabled" | "relogin_without_pa
 type NumberKey =
   | "relogin_cooldown_hours"
   | "push_auth_wait_seconds"
+  | "relogin_max_failures"
   | "relogin_delay_min_seconds"
   | "relogin_delay_max_seconds"
   | "relogin_when_access_token_expires_within_hours"
@@ -103,11 +104,18 @@ const NUMBER_FIELDS: { key: NumberKey; group: GroupKey; label: string; unit: str
     help: "自动重登失败后隔多久再试。巡检和手动重登不受限制。",
   },
   {
+    key: "relogin_max_failures",
+    group: "relogin",
+    label: "连续失败后停止",
+    unit: "次",
+    help: "网络、限流、验证码没收到这类失败，连续这么多次后不再自动重试，等你手动重新登录。Google 登录、密码错误、拒绝批准这类第一次就停。填 0 一直重试。",
+  },
+  {
     key: "push_auth_wait_seconds",
     group: "relogin",
     label: "等待手机批准",
     unit: "秒",
-    help: "账号开了「在 ChatGPT App 里批准登录」时，先等这么久让你在手机上点批准，没批准就改用邮箱验证码。填 0 直接用验证码，最多 600。",
+    help: "只对你手动点「重新登录」生效：先等这么久让你在手机 ChatGPT App 上点批准，没批准就改用邮箱验证码。巡检和自动重登不等。填 0 不等，最多 600。",
   },
   {
     key: "relogin_when_access_token_expires_within_hours",

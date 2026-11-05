@@ -259,6 +259,7 @@ function DrawerBody({
           {account.last_relogin_error ? (
             <ErrorBox>
               最近一次重登失败{account.relogin_fail_count ? `（共 ${account.relogin_fail_count} 次）` : ""}：{account.last_relogin_error}
+              {account.relogin_paused ? <div className="mt-1 font-medium">已停止自动重登，需要你点「立即重新登录」手动处理。</div> : null}
             </ErrorBox>
           ) : null}
           <Button
