@@ -2803,6 +2803,12 @@ class OpenAIBackendAPI:
                 "permission": [],
                 "root": slug,
                 "parent": None,
+                # Upstream details for the model management page; stripped before /v1/models.
+                "_meta": {
+                    "title": str(item.get("title") or ""),
+                    "reasoning_type": str(item.get("reasoning_type") or ""),
+                    "tags": [str(tag) for tag in item.get("tags") or [] if isinstance(tag, str)],
+                },
             })
         data.sort(key=lambda item: item["id"])
         return {"object": "list", "data": data}

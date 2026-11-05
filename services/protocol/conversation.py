@@ -705,7 +705,21 @@ def conversation_events(
         thinking_effort=thinking_effort if not image_model else "",
         persist_conversation=persist_conversation,
     )
+    if not image_model:
+        payloads = _track_model_access(payloads, getattr(backend, "access_token", ""), model)
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
+
+
+def _track_model_access(payloads: Iterator[str], access_token: str, model: str) -> Iterator[str]:
+    """Pass payloads through; note a conversation 403 (or a later success) for the model page."""
+    from services.model_service import model_catalog_service
+
+    try:
+        yield from payloads
+    except Exception as exc:
+        model_catalog_service.record_conversation_result(access_token, model, exc)
+        raise
+    model_catalog_service.record_conversation_result(access_token, model)
 
 
 def text_backend(model: str = "auto") -> OpenAIBackendAPI:

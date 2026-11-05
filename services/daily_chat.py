@@ -329,11 +329,15 @@ class DailyChatService:
                     day, item["id"],
                     {"state": "skipped", "skip_kind": "ineligible", "reason": reason, "finished_at": _iso(self._now())},
                 )
-            result = self.accounts.test_real_chat(token)
+            from services.model_rules import model_rules_store
+
+            model = model_rules_store.feature_model("daily_chat_model")
+            result = self.accounts.test_real_chat(token, model=model)
             changes = {
                 "state": "done",
                 "result": result.get("status") or "测试失败",
                 "error": result.get("error") or "",
+                "model": model,
                 "prompt": result.get("prompt") or "",
                 "prompt_id": result.get("prompt_id") or "",
                 "conversation_url": result.get("conversation_url") or "",
