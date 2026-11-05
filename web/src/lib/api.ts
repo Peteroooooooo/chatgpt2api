@@ -40,6 +40,7 @@ export type Account = {
   last_relogin_at?: string | null;
   last_relogin_error?: string | null;
   relogin_fail_count?: number;
+  relogin_paused?: boolean;
   has_auto_renewal?: boolean;
   has_plus_promo?: boolean;
   promo_title?: string | null;
@@ -1078,6 +1079,7 @@ export type KeeperSettings = {
   relogin_without_password: boolean;
   relogin_cooldown_hours: number;
   push_auth_wait_seconds: number;
+  relogin_max_failures: number;
   relogin_delay_min_seconds: number;
   relogin_delay_max_seconds: number;
   relogin_when_access_token_expires_within_hours: number;

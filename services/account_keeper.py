@@ -24,6 +24,7 @@ DEFAULT_SETTINGS = {
     "relogin_without_password": True,
     "relogin_cooldown_hours": 6,
     "push_auth_wait_seconds": 120,
+    "relogin_max_failures": 3,
     "relogin_delay_min_seconds": 20,
     "relogin_delay_max_seconds": 60,
     "relogin_when_access_token_expires_within_hours": 48,
@@ -163,6 +164,11 @@ class AccountKeeper:
                 account, int(settings["relogin_when_access_token_expires_within_hours"])
             )
 
+        if need_relogin and (self.accounts.get_account(token) or account).get("relogin_paused"):
+            last_error = (self.accounts.get_account(token) or account).get("last_relogin_error") or "unknown"
+            entry["result"] = "needs_manual"
+            entry["error"] = f"auto re-login stopped after: {last_error}; re-login manually"[:300]
+            return entry
         if need_relogin:
             creds = self.accounts.relogin_credentials(account) if email else None
             if not creds:
