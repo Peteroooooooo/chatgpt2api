@@ -13,14 +13,9 @@ from urllib.parse import urlencode, urljoin, urlparse
 from services.login_otp import AUTH_BASE, follow_to_auth_code, validate_code_from_mail
 from services.login_profile import complete_about_you, is_about_you_url
 from services.mailbox.base import MailboxError
+from utils.browser_profile import SEC_CH_UA, SEC_CH_UA_MOBILE, SEC_CH_UA_PLATFORM, USER_AGENT
 
 CHATGPT_BASE = "https://chatgpt.com"
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
-)
-SEC_CH_UA = '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"'
 
 
 def _json(response) -> dict:
@@ -59,8 +54,8 @@ def register_account(session, email: str, password: str, mailbox, *, sentinel) -
         "accept-language": "en-US,en;q=0.9",
         "user-agent": USER_AGENT,
         "sec-ch-ua": SEC_CH_UA,
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
+        "sec-ch-ua-mobile": SEC_CH_UA_MOBILE,
+        "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
         "sec-fetch-dest": "document",
         "sec-fetch-mode": "navigate",
         "upgrade-insecure-requests": "1",
@@ -107,8 +102,8 @@ def register_account(session, email: str, password: str, mailbox, *, sentinel) -
         "origin": AUTH_BASE,
         "user-agent": USER_AGENT,
         "sec-ch-ua": SEC_CH_UA,
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
+        "sec-ch-ua-mobile": SEC_CH_UA_MOBILE,
+        "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",

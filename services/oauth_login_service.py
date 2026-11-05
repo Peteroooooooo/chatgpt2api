@@ -33,6 +33,7 @@ from services.openai_oauth import (
     user_agent,
 )
 from services.proxy_service import proxy_settings
+from utils import browser_profile
 
 
 class OAuthLoginError(Exception):
@@ -193,7 +194,7 @@ class OAuthLoginService:
     @staticmethod
     def _exchange_code(code: str, code_verifier: str, redirect_uri: str) -> dict[str, str]:
         """调用 /api/accounts/oauth/token 用 code+verifier 换 token 三件套。"""
-        kwargs = proxy_settings.build_session_kwargs(impersonate="chrome", verify=False)
+        kwargs = proxy_settings.build_session_kwargs(impersonate=browser_profile.IMPERSONATE, verify=False)
         session = requests.Session(**kwargs)
         try:
             response = session.post(

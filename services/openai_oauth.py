@@ -1,15 +1,13 @@
+from utils import browser_profile
+
 auth_base = "https://auth.openai.com"
 platform_base = "https://platform.openai.com"
 platform_oauth_client_id = "app_2SKx67EdpoN0G6j64rFvigXD"
 platform_oauth_redirect_uri = f"{platform_base}/auth/callback"
 platform_oauth_audience = "https://api.openai.com/v1"
 platform_auth0_client = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
-user_agent = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
-)
-sec_ch_ua = '"Google Chrome";v="145", "Not?A_Brand";v="8", "Chromium";v="145"'
+user_agent = browser_profile.USER_AGENT
+sec_ch_ua = browser_profile.SEC_CH_UA
 
 common_headers = {
     "accept": "application/json",
@@ -23,8 +21,8 @@ common_headers = {
     "priority": "u=1, i",
     "sec-gpc": "1",
     "sec-ch-ua": sec_ch_ua,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
+    "sec-ch-ua-mobile": browser_profile.SEC_CH_UA_MOBILE,
+    "sec-ch-ua-platform": browser_profile.SEC_CH_UA_PLATFORM,
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",

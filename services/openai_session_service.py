@@ -8,6 +8,7 @@ from typing import Any
 from curl_cffi.requests import Session
 
 from services.proxy_service import proxy_settings
+from utils import browser_profile
 
 
 SESSION_URL = "https://chatgpt.com/api/auth/session"
@@ -100,11 +101,7 @@ def _extract_user_id(payload: dict[str, Any]) -> str:
 
 
 SESSION_COOKIE_NAMES = ("__Secure-next-auth.session-token", "next-auth.session-token")
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
-)
+_USER_AGENT = browser_profile.USER_AGENT
 
 
 def is_cloudflare_challenge(response: Any) -> bool:
@@ -141,7 +138,11 @@ def refresh_chatgpt_session(account: dict[str, Any]) -> dict[str, Any]:
 
     session = Session(
         **proxy_settings.build_session_kwargs(
-            account=account, impersonate="chrome", verify=True, upstream=True
+            account=account,
+            impersonate=browser_profile.IMPERSONATE,
+            verify=True,
+            upstream=True,
+            headers=browser_profile.base_headers(),
         )
     )
     try:
