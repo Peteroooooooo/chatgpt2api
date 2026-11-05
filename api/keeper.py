@@ -94,7 +94,7 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         job = account_keeper.start_import(body.text)
         if not job["total"]:
-            raise HTTPException(status_code=400, detail={"error": "没有识别到 邮箱----密码 格式的行"})
+            raise HTTPException(status_code=400, detail={"error": "没有识别到邮箱（每行一个邮箱，或 邮箱----密码）"})
         return job
 
     @router.get("/api/keeper/jobs/{job_id}")

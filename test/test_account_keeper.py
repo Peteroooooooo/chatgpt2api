@@ -34,6 +34,9 @@ class PatrolService(AccountService):
             return email, ""
         return None
 
+    def has_mailbox_route(self, email):
+        return bool(self.routed_domain) and str(email).endswith("@" + self.routed_domain)
+
     def _request_access_token_refresh(self, refresh_token, account=None):
         if not self.refresh_ok:
             raise RuntimeError("oauth_refresh_http_401: app_session_terminated")
@@ -198,6 +201,60 @@ class KeeperTests(unittest.TestCase):
             AccountKeeper.parse_credentials(text),
             [("a@x.com", "p:w1"), ("b@y.com", "pw2"), ("c@z.com", "pw 3")],
         )
+
+    def test_parse_accepts_email_only_lines(self):
+        text = "only@040601.xyz\n  spaced@duck.com  \ntrail@040601.com----\nwith@x.com----pw\nonly@040601.xyz----later\nnot-an-email\n@x.com"
+        self.assertEqual(
+            AccountKeeper.parse_credentials(text),
+            [("only@040601.xyz", ""), ("spaced@duck.com", ""), ("trail@040601.com", ""), ("with@x.com", "pw")],
+        )
+
+    def test_email_only_login_adds_account_without_password(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        result = service.login_and_add_account("new@040601.xyz")
+        self.assertTrue(result["ok"])
+        self.assertEqual(service.logins, ["new@040601.xyz"])
+        account = service.get_account(service.find_token_by_email("new@040601.xyz"))
+        self.assertEqual(account.get("password") or "", "")
+        self.assertEqual(account["refresh_token"], "rt-new")
+
+    def test_email_only_login_without_mailbox_route_does_not_call_openai(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        result = service.login_and_add_account("someone@proton.me")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["error"].startswith("no_mailbox_route"))
+        self.assertEqual(service.logins, [])
+
+    def test_import_waits_only_after_real_login_attempts(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        keeper = self.keeper(service)
+        sleeps = []
+        keeper._sleep = sleeps.append
+        job = keeper.start_import("a@proton.me\nb@040601.xyz\nc@proton.me\nd@040601.xyz")
+        for _ in range(100):
+            if keeper.get_job(job["id"])["state"] == "finished":
+                break
+            time.sleep(0.02)
+        finished = keeper.get_job(job["id"])
+        self.assertEqual([item["ok"] for item in finished["items"]], [False, True, False, True])
+        self.assertEqual(service.logins, ["b@040601.xyz", "d@040601.xyz"])
+        self.assertEqual(len(sleeps), 1)
+        self.assertTrue(all("attempted" not in item for item in finished["items"]))
+
+    def test_email_only_line_for_existing_account_uses_stored_password(self):
+        old = token("old")
+        service = PatrolService([{"access_token": old, "email": "known@x.com", "password": "saved", "status": "异常"}])
+        passwords = []
+        original = service._login_with_password
+
+        def spy(email, password, push_wait_seconds=0):
+            passwords.append(password)
+            return original(email, password, push_wait_seconds)
+
+        service._login_with_password = spy
+        result = service.login_and_add_account("known@x.com")
+        self.assertTrue(result["ok"])
+        self.assertEqual(passwords, ["saved"])
 
     def test_login_and_add_new_account(self):
         service = PatrolService([])

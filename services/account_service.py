@@ -2167,17 +2167,30 @@ class AccountService:
                     return token
         return ""
 
-    def login_and_add_account(self, email: str, password: str) -> dict:
-        """Log in with email + password (mailbox OTP if asked) and add or update the account."""
+    def has_mailbox_route(self, email: str) -> bool:
+        try:
+            from services.mailbox.service import mailbox_service
+
+            return mailbox_service.resolve(email) is not None
+        except Exception:
+            return False
+
+    def login_and_add_account(self, email: str, password: str = "") -> dict:
+        """Log in and add or update the account. Without a password the login uses an email code."""
         email = str(email or "").strip()
         password = str(password or "").strip()
-        if not email or not password:
-            return {"ok": False, "email": email, "error": "email and password are required"}
+        if not email or "@" not in email:
+            return {"ok": False, "email": email, "error": "email is required", "attempted": False}
         existing = self.find_token_by_email(email)
+        if existing and not password:
+            password = str((self.get_account(existing) or {}).get("password") or "").strip()
+        if not password and not self.has_mailbox_route(email):
+            return {"ok": False, "email": email, "error": "no_mailbox_route: 这个域名没有配置收件，收不到验证码", "attempted": False}
         if existing:
-            self.update_account(existing, {"password": password}, quiet=True)
+            if password:
+                self.update_account(existing, {"password": password}, quiet=True)
             self._password_re_login_thread(existing, email, password, "manual_relogin")
-            account = self.get_account(existing) or {}
+            account = self.get_account(self.find_token_by_email(email) or existing) or {}
             ok = account.get("status") == "正常" and not account.get("last_relogin_error")
             return {"ok": ok, "email": email, "updated": True, "error": account.get("last_relogin_error")}
         result = self._login_with_password(email, password, self.push_auth_wait_seconds)
