@@ -888,14 +888,25 @@ class AccountService:
                     except Exception:
                         page = {}
                     if str(page.get("type") or "") == "login_password":
-                        return {"ok": False, "error": "password_required", "detail": {"page": page}}
+                        login_resp = session.post(
+                            f"{auth_base}/api/accounts/passwordless/send-otp",
+                            headers={**login_headers, "referer": f"{auth_base}/log-in/password"},
+                            timeout=30,
+                        )
+                        if login_resp.status_code != 200:
+                            return {"ok": False, "error": "password_required", "detail": {"send_otp_status": login_resp.status_code, "text": login_resp.text[:300]}}
             
             login_data = {}
             try:
                 login_data = login_resp.json() if login_resp.text else {}
             except Exception:
                 pass
-            
+            if not password and login_resp.status_code == 200 and not (login_data.get("page") or {}).get("type"):
+                login_data = {
+                    "continue_url": login_data.get("continue_url") or f"{auth_base}/email-verification",
+                    "page": {"type": "email_otp_verification"},
+                }
+
             if login_resp.status_code != 200:
                 error_code = login_data.get("error", {}).get("code", "")
                 error_msg = login_data.get("error", {}).get("message", "")
