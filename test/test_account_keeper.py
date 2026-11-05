@@ -1,6 +1,7 @@
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from services.account_keeper import AccountKeeper
@@ -219,3 +220,13 @@ class KeeperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenExpiryTests(unittest.TestCase):
+    def test_stored_expiry_follows_the_token(self):
+        fresh = token("k", expires_in=10 * 86400)
+        service = AccountService(MemoryStorage([{"access_token": fresh, "email": "k@x.com", "access_token_expires_at": "2026-09-22T18:35:43+00:00"}]))
+        stored = service.get_account(fresh)["access_token_expires_at"]
+        self.assertEqual(stored, datetime.fromtimestamp(AccountService._jwt_exp(fresh), timezone.utc).isoformat())
+        service.update_account(fresh, {"access_token_expires_at": "2020-01-01T00:00:00+00:00"}, quiet=True)
+        self.assertEqual(service.get_account(fresh)["access_token_expires_at"], stored)
