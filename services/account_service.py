@@ -846,9 +846,11 @@ class AccountService:
                 "audience": platform_oauth_audience,
                 "redirect_uri": platform_oauth_redirect_uri,
                 "device_id": device_id,
-                "screen_hint": "login_or_signup",
+                # Without a password, a login_hint lands on the sign-up email check (code accepted,
+                # then "about you" + registration_disallowed). Plain login + submitting the email works.
+                "screen_hint": "login_or_signup" if password else "login",
                 "max_age": "0",
-                "login_hint": email,
+                **({"login_hint": email} if password else {}),
                 "scope": "openid profile email offline_access",
                 "response_type": "code",
                 "response_mode": "query",
@@ -944,9 +946,20 @@ class AccountService:
                     except Exception:
                         page = {}
                     if str(page.get("type") or "") == "login_password":
+                        # Open the password page like a browser before asking for a one-time code.
+                        try:
+                            session.get(
+                                f"{auth_base}/log-in/password",
+                                headers={**login_headers, "accept": "text/html,application/xhtml+xml,*/*;q=0.8", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document", "referer": f"{auth_base}/log-in"},
+                                timeout=30,
+                            )
+                        except Exception:
+                            pass
+                        login_started_at = datetime.now(timezone.utc)
+                        otp_headers = {k: v for k, v in login_headers.items() if k != "openai-sentinel-token"}
                         login_resp = session.post(
                             f"{auth_base}/api/accounts/passwordless/send-otp",
-                            headers={**login_headers, "referer": f"{auth_base}/log-in/password"},
+                            headers={**otp_headers, "referer": f"{auth_base}/log-in/password"},
                             timeout=30,
                         )
                         if login_resp.status_code != 200:
