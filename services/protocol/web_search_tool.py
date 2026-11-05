@@ -3,9 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from services.account_service import account_service
-from services.openai_backend_api import OpenAIBackendAPI
-
 WEB_SEARCH_TOOL_TYPES = {"web_search", "web_search_preview", "web_search_preview_2025_03_11"}
 SEARCH_CHAT_MODEL_PREFIXES = (
     "gpt-4o-search-preview",
@@ -154,7 +151,8 @@ def text_with_url_citations(result: dict[str, Any]) -> tuple[str, list[dict[str,
 
 
 def run_web_search(query: str) -> dict[str, Any]:
-    token = account_service.get_text_access_token()
-    result = OpenAIBackendAPI(token).search(query)
-    account_service.mark_text_used(token)
+    """Search with the configured search model on an account allowed to run it."""
+    from services.protocol.openai_search import search_with_account
+
+    result, _token = search_with_account(query)
     return result

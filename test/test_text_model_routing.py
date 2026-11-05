@@ -44,11 +44,12 @@ class TextAccountRoutingTests(unittest.TestCase):
 
         self.assertEqual(token, "pro")
 
-    def test_auto_model_keeps_existing_unfiltered_rotation(self) -> None:
+    def test_auto_model_is_routed_like_any_other_model(self) -> None:
+        route = ModelRoute(account_types=frozenset({"free", "Plus", "Pro"}), allow_anonymous=True)
         with mock.patch(
             "services.model_service.model_catalog_service.route_for_model",
-            side_effect=AssertionError("auto must not load the model catalog"),
-        ):
+            return_value=route,
+        ) as router:
             tokens = {
                 self.service.get_text_access_token(model="auto"),
                 self.service.get_text_access_token(model="auto"),
@@ -56,6 +57,60 @@ class TextAccountRoutingTests(unittest.TestCase):
             }
 
         self.assertEqual(tokens, {"free", "plus", "pro"})
+        router.assert_called_with("auto")
+
+    def test_auto_model_skips_account_types_the_rules_exclude(self) -> None:
+        route = ModelRoute(account_types=frozenset({"free"}), allow_anonymous=True)
+        with mock.patch(
+            "services.model_service.model_catalog_service.route_for_model",
+            return_value=route,
+        ):
+            tokens = {self.service.get_text_access_token(model="auto") for _ in range(4)}
+
+        self.assertEqual(tokens, {"free"})
+
+    def test_hidden_model_is_refused_with_reason(self) -> None:
+        route = ModelRoute(account_types=frozenset({"free"}), exposed=False)
+        with mock.patch(
+            "services.model_service.model_catalog_service.route_for_model",
+            return_value=route,
+        ), self.assertRaises(ModelUnavailableError) as caught:
+            self.service.get_text_access_token(model="secret-model")
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(caught.exception.code, "model_not_exposed")
+        self.assertIn("没有开放", str(caught.exception))
+
+    def test_internal_feature_ignores_exposed_switch_but_keeps_type_filter(self) -> None:
+        route = ModelRoute(account_types=frozenset({"Plus"}), exposed=False)
+        with mock.patch(
+            "services.model_service.model_catalog_service.route_for_model",
+            return_value=route,
+        ):
+            token = self.service.get_text_access_token(model="secret-model", internal=True)
+
+        self.assertEqual(token, "plus")
+
+    def test_internal_feature_model_unknown_to_catalog_runs_on_any_account(self) -> None:
+        route = ModelRoute(account_types=frozenset(), known=False, exposed=False)
+        with mock.patch(
+            "services.model_service.model_catalog_service.route_for_model",
+            return_value=route,
+        ):
+            tokens = {self.service.get_text_access_token(model="gpt-5-5", internal=True) for _ in range(3)}
+
+        self.assertEqual(tokens, {"free", "plus", "pro"})
+
+    def test_unknown_model_from_client_is_a_400(self) -> None:
+        route = ModelRoute(account_types=frozenset(), known=False, exposed=False)
+        with mock.patch(
+            "services.model_service.model_catalog_service.route_for_model",
+            return_value=route,
+        ), self.assertRaises(ModelUnavailableError) as caught:
+            self.service.get_text_access_token(model="gpt-5-5")
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertEqual(caught.exception.code, "model_not_found")
 
     def test_anonymous_model_uses_anonymous_backend(self) -> None:
         route = ModelRoute(account_types=frozenset(), allow_anonymous=True)

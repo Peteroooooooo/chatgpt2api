@@ -46,6 +46,31 @@ def require_admin(authorization: str | None) -> dict[str, object]:
     return identity
 
 
+def key_allowed_models(identity: dict[str, object]) -> list[str] | None:
+    """Models a key may use; None = unrestricted (admin keys, or a key with an empty list)."""
+    if identity.get("role") == "admin":
+        return None
+    allowed = [str(item) for item in identity.get("allowed_models") or [] if str(item or "").strip()]
+    return allowed or None
+
+
+def require_model_allowed(identity: dict[str, object], model: str) -> None:
+    allowed = key_allowed_models(identity)
+    model = str(model or "").strip()
+    if allowed is not None and model not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": {
+                    "message": f"这个密钥不能使用模型 {model}，它能用的模型：{'、'.join(allowed)}",
+                    "type": "permission_error",
+                    "code": "model_not_allowed_for_key",
+                    "param": "model",
+                }
+            },
+        )
+
+
 def resolve_image_base_url(request: Request) -> str:
     return config.base_url or f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
 

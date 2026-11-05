@@ -15,6 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
+from services.model_rules import ModelUnavailableError
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
@@ -200,11 +201,15 @@ def _image_error_response(exc: Exception) -> JSONResponse:
     return openai_error_response(message, 502)
 
 
-def _protocol_error_response(exc: Exception, status_code: int, sse: str) -> JSONResponse:
+def _protocol_error_response(exc: Exception, status_code: int, sse: str, code: str | None = None) -> JSONResponse:
     message = str(exc)
     if sse == "anthropic":
         return anthropic_error_response(message, status_code)
-    return openai_error_response(message, status_code)
+    return openai_error_response(message, status_code, code=code)
+
+
+def _model_unavailable_response(exc: ModelUnavailableError, sse: str) -> JSONResponse:
+    return _protocol_error_response(exc, int(exc.status_code), sse, code=exc.code)
 
 
 def _next_item(items):
@@ -236,6 +241,9 @@ class LoggedCall:
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
+        except ModelUnavailableError as exc:
+            self.log("调用失败", status="failed", error=str(exc))
+            return _model_unavailable_response(exc, sse)
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
@@ -258,6 +266,9 @@ class LoggedCall:
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
+        except ModelUnavailableError as exc:
+            self.log("调用失败", status="failed", error=str(exc))
+            return _model_unavailable_response(exc, sse)
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
