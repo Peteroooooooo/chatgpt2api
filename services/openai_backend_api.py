@@ -24,6 +24,7 @@ from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
 from utils import browser_profile
+from utils.answer_markup import clean_answer_markup
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
@@ -2002,7 +2003,7 @@ class OpenAIBackendAPI:
             tip = chain[-1] if chain else {}
             # Later non-final messages mean the model is still working on the reply.
             status = self._search_message_status(message) if tip is message else ""
-        answer = "\n\n".join(self._search_message_text(item) for item in segments).strip()
+        answer = clean_answer_markup("\n\n".join(self._search_message_text(item) for item in segments)).strip()
         sources: list[Dict[str, str]] = []
         for segment in segments:
             for source in self._extract_search_sources(segment):
