@@ -933,6 +933,10 @@ class AccountService:
                 if isinstance(page_info, dict):
                     page_type = str(page_info.get("type") or "")
                 
+                if page_type == "external_url" and "accounts.google.com" in continue_url:
+                    return {"ok": False, "error": "google_sign_in_account", "detail": {"page": page_type}}
+                if page_type == "push_auth_verification":
+                    return {"ok": False, "error": "push_auth_required", "detail": {"page": page_type}}
                 if page_type == "email_otp_verification":
                     from services.login_otp import complete_email_otp
                     from services.mailbox.service import mailbox_service
