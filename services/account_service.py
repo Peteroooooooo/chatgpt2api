@@ -530,11 +530,9 @@ class AccountService:
                 self._record_token_refresh_error(active_token, event, error_str)
                 # 如果是 app_session_terminated 错误，尝试密码重新登录
                 if "app_session_terminated" in error_str.lower():
-                    # 获取账号信息（email, password）
-                    email = str(account.get("email") or "").strip()
-                    password = str(account.get("password") or "").strip()
-                    if email and password:
-                        # 创建新线程执行密码重新登录
+                    creds = self.relogin_credentials(account)
+                    if creds:
+                        email, password = creds
                         t = Thread(
                             target=self._password_re_login_thread,
                             args=(active_token, email, password, event),
@@ -576,19 +574,45 @@ class AccountService:
             self._record_token_refresh_error(active_token, event, error)
             return active_token, error
 
-    _RELOGIN_RETRY_COOLDOWN_SECONDS = 6 * 60 * 60
+    relogin_cooldown_seconds = 6 * 60 * 60
+    auto_relogin_enabled = True
+    relogin_without_password = True
     _RELOGIN_FORCED_EVENTS = {"manual_relogin", "patrol"}
     _relogin_inflight: set[str] = set()
     _relogin_inflight_lock = Lock()
 
+    def apply_relogin_policy(self, settings: dict) -> None:
+        self.relogin_cooldown_seconds = max(0, int(settings.get("relogin_cooldown_hours", 6))) * 3600
+        self.auto_relogin_enabled = bool(settings.get("auto_relogin_enabled", True))
+        self.relogin_without_password = bool(settings.get("relogin_without_password", True))
+
+    def relogin_credentials(self, account: dict) -> tuple[str, str] | None:
+        """(email, password) to log in with; password is "" for an email-code login. None if impossible."""
+        email = str(account.get("email") or "").strip()
+        password = str(account.get("password") or "").strip()
+        if not email:
+            return None
+        if password:
+            return email, password
+        if not self.relogin_without_password:
+            return None
+        try:
+            from services.mailbox.service import mailbox_service
+
+            return (email, "") if mailbox_service.resolve(email) is not None else None
+        except Exception:
+            return None
+
     def _relogin_allowed(self, access_token: str, event: str) -> bool:
         if event in self._RELOGIN_FORCED_EVENTS:
             return True
+        if not self.auto_relogin_enabled:
+            return False
         account = self.get_account(access_token) or {}
         if not int(account.get("relogin_fail_count") or 0):
             return True
         last = self._parse_time(account.get("last_relogin_at"))
-        return last is None or (datetime.now(timezone.utc) - last).total_seconds() >= self._RELOGIN_RETRY_COOLDOWN_SECONDS
+        return last is None or (datetime.now(timezone.utc) - last).total_seconds() >= self.relogin_cooldown_seconds
 
     def _mark_relogin_failed(self, access_token: str, error: str) -> None:
         """Keep the account (and its stored password) so a later patrol can retry."""
@@ -2059,10 +2083,10 @@ class AccountService:
                 status = str(account.get("status") or "").strip()
                 if status != "异常":
                     continue
-                email = str(account.get("email") or "").strip()
-                password = str(account.get("password") or "").strip()
-                if not email or not password:
+                creds = self.relogin_credentials(account)
+                if not creds:
                     continue
+                email, password = creds
                 t = Thread(
                     target=self._password_re_login_thread,
                     args=(token, email, password, "auto_relogin_after_refresh"),
@@ -2149,13 +2173,13 @@ class AccountService:
                     self.update_relogin_progress(progress_id, token, "跳过", "账号不存在")
                 continue
 
-            email = str(account.get("email") or "").strip()
-            password = str(account.get("password") or "").strip()
-            if not email or not password:
+            creds = self.relogin_credentials(account)
+            if not creds:
                 skipped += 1
                 if progress_id:
-                    self.update_relogin_progress(progress_id, token, "跳过", "无邮箱密码")
+                    self.update_relogin_progress(progress_id, token, "跳过", "无密码且邮箱没有配置路由")
                 continue
+            email, password = creds
 
             # 在新线程中执行密码重新登录
             t = Thread(

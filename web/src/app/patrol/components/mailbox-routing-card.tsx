@@ -238,8 +238,9 @@ export function MailboxRoutingCard() {
       return false;
     }
     const draft = routeRows.map((row) => ({ match: row.match.trim().toLowerCase(), provider: row.provider }));
+    const current = saved.routes.map((route) => ({ match: route.match, provider: route.provider }));
     return (
-      JSON.stringify(draft) !== JSON.stringify(saved.routes) ||
+      JSON.stringify(draft) !== JSON.stringify(current) ||
       otpTimeout.trim() !== String(saved.otp_timeout_seconds) ||
       pollInterval.trim() !== String(saved.poll_interval_seconds)
     );
@@ -502,6 +503,11 @@ export function MailboxRoutingCard() {
             </div>
           ) : (
             <>
+              {saved?.env_pending ? (
+                <div className="rounded-xl bg-sky-50 px-4 py-3 text-xs leading-5 text-sky-800">
+                  下面的邮箱目前读自服务器的 mailbox.env。在这里保存一次之后，就以网页上的设置为准，可以直接编辑、删除和新增，之后不用再改 mailbox.env。
+                </div>
+              ) : null}
               {providerNames.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-3 rounded-xl bg-stone-50 px-6 py-10 text-center">
                   <Mail className="size-8 text-stone-300" />
