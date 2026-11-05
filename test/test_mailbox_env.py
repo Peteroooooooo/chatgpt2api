@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,16 +76,33 @@ class EnvMergeTests(unittest.TestCase):
         self.assertEqual(self.service.resolve("c@duck.com").name, "qq")
         self.assertIsNone(self.service.resolve("x@proton.me"))
 
-    def test_ui_save_keeps_env_out_of_file_and_allows_extra_routes(self):
+    def test_first_ui_save_takes_over_env_mailboxes(self):
         public = self.service.public_settings()
+        self.assertTrue(public["env_pending"])
         self.assertEqual(public["providers"]["cf"]["admin_password"], "")
         public["routes"].append({"match": "proton.me", "provider": "gmail"})
+        public["routes"].append(dict(public["routes"][0]))
         self.service.update_settings(public)
-        saved = self.path.read_text(encoding="utf-8")
-        self.assertNotIn("cfpw", saved)
-        self.assertNotIn("040601.xyz", saved)
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertTrue(saved["env_imported"])
+        self.assertEqual(saved["providers"]["cf"]["admin_password"], "cfpw")
+        self.assertNotIn("source", saved["providers"]["cf"])
+        self.assertEqual(len(saved["routes"]), 6)
         self.assertEqual(self.service.resolve("x@proton.me").name, "gmail")
         self.assertEqual(self.service.resolve("a@040601.xyz").name, "cf")
+        self.assertFalse(self.service.public_settings().get("env_pending"))
+
+        later_env = mailbox_config_from_env({**LEGACY_ENV, "MAILBOX_CF_DOMAINS": "other.org"})
+        reloaded = MailboxService(self.path, env_config=later_env)
+        self.assertEqual(reloaded.resolve("a@040601.xyz").name, "cf")
+        self.assertIsNone(reloaded.resolve("a@other.org"))
+
+    def test_ui_can_delete_an_env_mailbox(self):
+        public = self.service.public_settings()
+        del public["providers"]["qq"]
+        public["routes"] = [r for r in public["routes"] if r["provider"] != "qq"]
+        self.service.update_settings(public)
+        self.assertIsNone(self.service.resolve("c@duck.com"))
 
 
 if __name__ == "__main__":

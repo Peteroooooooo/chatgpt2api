@@ -32,6 +32,8 @@ class MailboxService:
     data/mailboxes.json:
       providers: {name: {kind, ...settings}}
       routes:    [{match, provider}]  match = full address, domain, or "*"
+      env_imported: true once the web page has saved; MAILBOX_* env is then ignored
+    Until that first save, MAILBOX_* env mailboxes and routes are merged in.
     The most specific route wins: full address, then the longest domain.
     """
 
@@ -54,6 +56,11 @@ class MailboxService:
             return {"providers": {}, "routes": []}
 
     def _merge(self) -> dict:
+        if self._file.get("env_imported"):
+            merged = {"providers": copy.deepcopy(self._file["providers"]), "routes": copy.deepcopy(self._file["routes"])}
+            for key, default in DEFAULTS.items():
+                merged[key] = self._file.get(key, default)
+            return merged
         env_providers = self._env.get("providers") or {}
         merged = {
             "providers": {**self._file["providers"], **copy.deepcopy(env_providers)},
@@ -61,6 +68,7 @@ class MailboxService:
         }
         for key, default in DEFAULTS.items():
             merged[key] = self._env.get(key, self._file.get(key, default))
+        merged["env_pending"] = bool(env_providers)
         return merged
 
     def _load(self) -> dict:
@@ -99,42 +107,44 @@ class MailboxService:
         return data
 
     def update_settings(self, incoming: dict) -> dict:
-        """Replace the UI-managed settings; env mailboxes/routes are read-only and skipped.
+        """Replace all mailbox settings with what the web page sent.
 
-        An empty secret field keeps the stored value.
+        The first save also takes over the MAILBOX_* env mailboxes: from then on the
+        file is the only source and env values are ignored. An empty secret field
+        keeps the previous value (from the file, or from env before the takeover).
         """
         with self._lock:
-            env_names = set((self._env.get("providers") or {}).keys())
+            previous_all = {**(self._env.get("providers") or {}), **self._file["providers"]} if not self._file.get("env_imported") else self._file["providers"]
             providers_in = incoming.get("providers") if isinstance(incoming.get("providers"), dict) else {}
             providers: dict[str, dict] = {}
             for name, settings in providers_in.items():
                 if not isinstance(settings, dict):
                     continue
                 name = str(name).strip()
-                if name in env_names or settings.get("source") == "env":
-                    continue
                 kind = str(settings.get("kind") or "").strip()
                 if not name or kind not in PROVIDER_CLASSES:
                     raise ValueError(f"mailbox '{name}': unknown kind '{kind}'")
-                previous = self._file["providers"].get(name, {})
+                previous = previous_all.get(name, {})
                 clean = {k: v for k, v in settings.items() if not str(k).startswith("has_") and k != "source"}
                 for key in SECRET_FIELDS:
                     if not str(clean.get(key) or "").strip() and previous.get(key):
                         clean[key] = previous[key]
                 providers[name] = clean
-            known = set(providers) | env_names
+            known = set(providers)
             routes: list[dict] = []
+            seen: set[tuple[str, str]] = set()
             for route in incoming.get("routes") or []:
-                if not isinstance(route, dict) or route.get("source") == "env":
+                if not isinstance(route, dict):
                     continue
                 match = str(route.get("match") or route.get("domain") or "").strip().lower()
                 provider = str(route.get("provider") or "").strip()
-                if not match or not provider:
+                if not match or not provider or (match, provider) in seen:
                     continue
                 if provider not in known:
                     raise ValueError(f"route '{match}' points to unknown mailbox '{provider}'")
+                seen.add((match, provider))
                 routes.append({"match": match, "provider": provider})
-            next_file = {"providers": providers, "routes": routes}
+            next_file = {"providers": providers, "routes": routes, "env_imported": True}
             for key, default in DEFAULTS.items():
                 try:
                     floor = 10 if key == "otp_timeout_seconds" else 1

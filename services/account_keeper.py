@@ -20,6 +20,9 @@ PATROL_DIR = DATA_DIR / "patrol"
 DEFAULT_SETTINGS = {
     "patrol_enabled": True,
     "patrol_time": "04:30",
+    "auto_relogin_enabled": True,
+    "relogin_without_password": True,
+    "relogin_cooldown_hours": 6,
     "relogin_delay_min_seconds": 20,
     "relogin_delay_max_seconds": 60,
     "relogin_when_access_token_expires_within_hours": 48,
@@ -52,6 +55,12 @@ class AccountKeeper:
         self._running: dict[str, Any] | None = None
         self._jobs: dict[str, dict[str, Any]] = {}
         self._sleep = Event().wait
+        self._apply_policy(self.get_settings())
+
+    def _apply_policy(self, settings: dict[str, Any]) -> None:
+        apply = getattr(self.accounts, "apply_relogin_policy", None)
+        if apply:
+            apply(settings)
 
     # ── settings ─────────────────────────────────────────────
     def get_settings(self) -> dict[str, Any]:
@@ -80,6 +89,7 @@ class AccountKeeper:
             current["relogin_delay_max_seconds"] = current["relogin_delay_min_seconds"]
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         self.settings_file.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self._apply_policy(current)
         return current
 
     def next_run_at(self, now: datetime | None = None) -> datetime:
@@ -98,15 +108,6 @@ class AccountKeeper:
     def _refresh(self, token: str, account: dict) -> tuple[str, str]:
         """Force a session_token / refresh_token renewal. Returns (new_token, error)."""
         return self.accounts.force_renew(token, "patrol")
-
-    @staticmethod
-    def _mailbox_routes(email: str) -> bool:
-        try:
-            from services.mailbox.service import mailbox_service
-
-            return mailbox_service.resolve(email) is not None
-        except Exception:
-            return False
 
     def _relogin(self, token: str, account: dict) -> tuple[str, str]:
         email = str(account.get("email") or "").strip()
@@ -161,12 +162,13 @@ class AccountKeeper:
             )
 
         if need_relogin:
-            can_use_code = bool(email) and self._mailbox_routes(email)
-            if not email or (not has_password and not can_use_code):
+            creds = self.accounts.relogin_credentials(account) if email else None
+            if not creds:
                 entry["result"] = "needs_manual"
-                entry["error"] = entry.get("refresh_error") or "no password and no mailbox route, cannot re-login"
+                reason = "no password and email-code login is off" if not self.accounts.relogin_without_password else "no password and no mailbox route"
+                entry["error"] = entry.get("refresh_error") or f"{reason}, cannot re-login"
                 return entry
-            entry["actions"].append("relogin" if has_password else "relogin_email_code")
+            entry["actions"].append("relogin" if creds[1] else "relogin_email_code")
             token, error = self._relogin(token, self.accounts.get_account(token) or account)
             entry["result"] = "relogin_failed" if error else "relogged_in"
             entry["error"] = error[:300]

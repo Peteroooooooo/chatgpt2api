@@ -15,11 +15,21 @@ def token(name: str, expires_in: int = 9 * 86400) -> str:
 class PatrolService(AccountService):
     """AccountService with OpenAI calls replaced."""
 
-    def __init__(self, accounts, refresh_ok=True, login_ok=True):
+    def __init__(self, accounts, refresh_ok=True, login_ok=True, routed_domain=None):
         super().__init__(MemoryStorage(accounts))
         self.refresh_ok = refresh_ok
         self.login_ok = login_ok
+        self.routed_domain = routed_domain
         self.logins: list[str] = []
+
+    def relogin_credentials(self, account):
+        email = str(account.get("email") or "")
+        password = str(account.get("password") or "")
+        if email and password:
+            return email, password
+        if email and self.relogin_without_password and self.routed_domain and email.endswith("@" + self.routed_domain):
+            return email, ""
+        return None
 
     def _request_access_token_refresh(self, refresh_token, account=None):
         if not self.refresh_ok:
@@ -101,21 +111,34 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual(service.logins, ["d@x.com"])
 
     def test_no_password_relogs_in_with_email_code_when_mailbox_routes(self):
-        service = PatrolService([{"access_token": token("g"), "session_token": "st", "email": "g@duck.com", "status": "异常"}])
+        service = PatrolService([{"access_token": token("g"), "session_token": "st", "email": "g@duck.com", "status": "异常"}], routed_domain="duck.com")
         service.force_renew = lambda tok, event="patrol": (tok, "session_token: 401")
         keeper = self.keeper(service)
-        keeper._mailbox_routes = lambda email: email.endswith("@duck.com")
         summary = keeper.run_patrol("test")
         self.assertEqual(summary["counts"], {"relogged_in": 1})
         self.assertEqual(service.logins, ["g@duck.com"])
         self.assertEqual(keeper.get_run(summary["id"])["entries"][0]["actions"], ["refresh", "relogin_email_code"])
 
-        keeper._mailbox_routes = lambda email: False
-        service = PatrolService([{"access_token": token("h"), "session_token": "st", "email": "h@other.com", "status": "异常"}])
+        service = PatrolService([{"access_token": token("h"), "session_token": "st", "email": "h@other.com", "status": "异常"}], routed_domain="duck.com")
         service.force_renew = lambda tok, event="patrol": (tok, "session_token: 401")
-        keeper.accounts = service
+        keeper = self.keeper(service)
         self.assertEqual(keeper.run_patrol("test")["counts"], {"needs_manual": 1})
         self.assertEqual(service.logins, [])
+
+    def test_settings_switch_off_email_code_and_auto_relogin(self):
+        service = PatrolService([{"access_token": token("i"), "session_token": "st", "email": "i@duck.com", "status": "异常"}], routed_domain="duck.com")
+        service.force_renew = lambda tok, event="patrol": (tok, "session_token: 401")
+        keeper = self.keeper(service)
+        keeper.update_settings({"relogin_without_password": False, "auto_relogin_enabled": False, "relogin_cooldown_hours": 2})
+        self.assertFalse(service.relogin_without_password)
+        self.assertEqual(service.relogin_cooldown_seconds, 7200)
+        self.assertEqual(keeper.run_patrol("test")["counts"], {"needs_manual": 1})
+        tok = service.list_tokens()[0]
+        self.assertFalse(service._relogin_allowed(tok, "refresh_token_keepalive"))
+        self.assertTrue(service._relogin_allowed(tok, "patrol"))
+
+        fresh = self.keeper(PatrolService([]))
+        self.assertFalse(fresh.accounts.auto_relogin_enabled)
 
     def test_parse_credentials(self):
         text = "a@x.com----p:w1\nb@y.com:pw2\n# skip\nbad line\nc@z.com\tpw 3\na@x.com----dup"

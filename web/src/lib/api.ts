@@ -1026,6 +1026,8 @@ export type MailboxSettings = {
   routes: MailboxRoute[];
   otp_timeout_seconds: number;
   poll_interval_seconds: number;
+  /** true while mailboxes still come from MAILBOX_* env; the first save from the page takes them over. */
+  env_pending?: boolean;
 };
 
 export type MailboxTestResult = {
@@ -1068,6 +1070,9 @@ export async function resolveMailbox(email: string) {
 export type KeeperSettings = {
   patrol_enabled: boolean;
   patrol_time: string;
+  auto_relogin_enabled: boolean;
+  relogin_without_password: boolean;
+  relogin_cooldown_hours: number;
   relogin_delay_min_seconds: number;
   relogin_delay_max_seconds: number;
   relogin_when_access_token_expires_within_hours: number;
