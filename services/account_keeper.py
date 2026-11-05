@@ -304,14 +304,15 @@ class AccountKeeper:
         result: list[tuple[str, str]] = []
         seen: set[str] = set()
         for raw in str(text or "").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
+            # Only leading whitespace is dropped: trailing spaces can belong to the password.
+            line = raw.lstrip()
+            if not line.strip() or line.startswith("#"):
                 continue
             match = CREDENTIAL_LINE.match(line)
-            if match:
-                email, password = match.group(1).strip(), match.group(2).strip()
+            if match and match.group(2).strip():
+                email, password = match.group(1).strip(), match.group(2)
             else:
-                bare = EMAIL_ONLY_LINE.match(line.rstrip("-:|\t "))
+                bare = EMAIL_ONLY_LINE.match(line.rstrip().rstrip("-:|\t "))
                 if not bare:
                     continue
                 email, password = bare.group(1), ""

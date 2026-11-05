@@ -415,7 +415,7 @@ function AccountsPageContent() {
           <p className="mt-1 text-sm text-stone-500">
             <b className="font-semibold text-stone-800">{accounts.length}</b> 个账号 · 可用图片额度{" "}
             <b className="font-semibold text-stone-800">{quotaTotal}</b>
-            {passwordProgress ? ` · 邮箱登录导入中 ${passwordProgress.done}/${passwordProgress.total}` : ""}
+            {passwordProgress ? ` · 邮箱登录 / 注册导入中 ${passwordProgress.done}/${passwordProgress.total}` : ""}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -473,7 +473,7 @@ function AccountsPageContent() {
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => setPasswordOpen(true)}>
                 <KeyRound />
-                邮箱登录导入
+                邮箱登录 / 注册导入
                 {passwordProgress ? (
                   <span className="ml-auto text-xs text-stone-400">
                     {passwordProgress.done}/{passwordProgress.total}

@@ -168,7 +168,7 @@ def wait_for_code(
     address: str,
     since: datetime,
     *,
-    timeout: float = 120,
+    timeout: float = 180,
     interval: float = 5,
     require_recipient_match: bool = True,
     exclude: set[str] | None = None,

@@ -100,6 +100,7 @@ def build_sentinel_token(
     *,
     user_agent: str = "",
     sec_ch_ua: str = "",
+    solve_turnstile: bool = False,
 ) -> tuple[str, str]:
     """请求 sentinel token 并返回 (sentinel_header_value, oai_sc_cookie_value)。
 
@@ -119,9 +120,10 @@ def build_sentinel_token(
     ua = user_agent or DEFAULT_SENTINEL_USER_AGENT
     ch_ua = sec_ch_ua or DEFAULT_SENTINEL_SEC_CH_UA
     generator = SentinelTokenGenerator(device_id, ua)
+    requirements_p = generator.generate_requirements_token()
     resp = session.post(
         "https://sentinel.openai.com/backend-api/sentinel/req",
-        data=json.dumps({"p": generator.generate_requirements_token(), "id": device_id, "flow": flow}),
+        data=json.dumps({"p": requirements_p, "id": device_id, "flow": flow}),
         headers={
             "Content-Type": "text/plain;charset=UTF-8",
             "Referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html",
@@ -153,7 +155,15 @@ def build_sentinel_token(
         if pow_data.get("required") and pow_data.get("seed")
         else generator.generate_requirements_token()
     )
-    sentinel_value = json.dumps({"p": p_value, "t": "", "c": token, "id": device_id, "flow": flow}, separators=(",", ":"))
+    turnstile_value = ""
+    turnstile = data.get("turnstile") or {}
+    if solve_turnstile and turnstile.get("required") and turnstile.get("dx"):
+        from utils.turnstile import solve_turnstile_token
+
+        turnstile_value = solve_turnstile_token(str(turnstile["dx"]), requirements_p) or ""
+    sentinel_value = json.dumps(
+        {"p": p_value, "t": turnstile_value, "c": token, "id": device_id, "flow": flow}, separators=(",", ":")
+    )
     # oai-sc cookie = "0" + sentinel token "c" value (the challenge token from the server)
     oai_sc_value = "0" + token
     return sentinel_value, oai_sc_value

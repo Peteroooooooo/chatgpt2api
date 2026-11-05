@@ -1,8 +1,15 @@
 import base64
 import json
 import random
+import re
 import time
 from typing import Any, Dict, Optional
+
+PAGE_SCRIPTS = (
+    "https://sentinel.openai.com/sentinel/20260810913b/sdk.js",
+    "https://sentinel.openai.com/backend-api/sentinel/sdk.js",
+)
+MAX_STEPS = 200_000
 
 
 class OrderedMap:
@@ -40,10 +47,23 @@ def _turnstile_to_str(value: Any) -> str:
     return str(value)
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, OrderedMap):
+        return {key: value.values[key] for key in value.keys}
+    return _turnstile_to_str(value)
+
+
 def _xor_string(text: str, key: str) -> str:
     if not key:
         return text
     return "".join(chr(ord(ch) ^ ord(key[i % len(key)])) for i, ch in enumerate(text))
+
+
+class Registers(dict):
+    """Unset registers read as undefined (None), as they do in the browser."""
+
+    def __missing__(self, key: Any) -> None:
+        return None
 
 
 def solve_turnstile_token(dx: str, p: str) -> Optional[str]:
@@ -53,7 +73,7 @@ def solve_turnstile_token(dx: str, p: str) -> Optional[str]:
     except Exception:
         return None
 
-    process_map: Dict[Any, Any] = {}
+    process_map: Dict[Any, Any] = Registers()
     start_time = time.time()
     result = ""
 
@@ -90,18 +110,43 @@ def solve_turnstile_token(dx: str, p: str) -> Optional[str]:
         values = [process_map[arg] for arg in args]
         if isinstance(target, str) and target == "window.Reflect.set":
             obj, key_name, val = values
-            obj.add(str(key_name), val)
+            if isinstance(obj, OrderedMap):
+                obj.add(str(key_name), val)
         elif callable(target):
             target(*values)
 
     def func_8(e: float, t: float) -> None:
         process_map[e] = process_map[t]
 
+    def func_11(e: float, t: float) -> None:
+        # First script src on the page matching the regex, like document.scripts in a browser.
+        try:
+            pattern = re.compile(_turnstile_to_str(process_map[t]))
+        except (re.error, KeyError):
+            process_map[e] = None
+            return
+        for src in PAGE_SCRIPTS:
+            match = pattern.search(src)
+            if match:
+                process_map[e] = match.group(0)
+                return
+        process_map[e] = None
+
+    def func_12(e: float) -> None:
+        process_map[e] = process_map
+
+    def func_13(e: float, t: float, *args: float) -> None:
+        try:
+            target = process_map[t]
+            target(*args)
+        except Exception as exc:
+            process_map[e] = str(exc)
+
     def func_14(e: float, t: float) -> None:
         process_map[e] = json.loads(process_map[t])
 
     def func_15(e: float, t: float) -> None:
-        process_map[e] = json.dumps(process_map[t])
+        process_map[e] = json.dumps(process_map[t], default=_json_default, separators=(",", ":"))
 
     def func_17(e: float, t: float, *args: float) -> None:
         call_args = [process_map[arg] for arg in args]
@@ -134,10 +179,11 @@ def solve_turnstile_token(dx: str, p: str) -> Optional[str]:
         process_map[e] = base64.b64encode(_turnstile_to_str(process_map[e]).encode()).decode()
 
     def func_20(e: float, t: float, n: float, *args: float) -> None:
-        if process_map[e] == process_map[t]:
-            target = process_map[n]
+        # Unset registers read as undefined in the browser, so two unset registers compare equal.
+        if process_map.get(e) == process_map.get(t):
+            target = process_map.get(n)
             if callable(target):
-                target(*[process_map[arg] for arg in args])
+                target(*args)
 
     def func_21(*_: Any) -> None:
         return
@@ -160,8 +206,11 @@ def solve_turnstile_token(dx: str, p: str) -> Optional[str]:
         6: func_6,
         7: func_7,
         8: func_8,
-        9: token_list,
+        9: list(token_list),
         10: "window",
+        11: func_11,
+        12: func_12,
+        13: func_13,
         14: func_14,
         15: func_15,
         16: p,
@@ -174,7 +223,11 @@ def solve_turnstile_token(dx: str, p: str) -> Optional[str]:
         24: func_24,
     })
 
-    for token in token_list:
+    # Register 9 is the instruction queue; a program may replace it with a new one (op 14 into 9).
+    steps = 0
+    while isinstance(process_map.get(9), list) and process_map[9] and steps < MAX_STEPS:
+        steps += 1
+        token = process_map[9].pop(0)
         try:
             fn = process_map.get(token[0])
             if callable(fn):
