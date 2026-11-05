@@ -2195,6 +2195,11 @@ class AccountService:
         if not email or "@" not in email:
             return {"ok": False, "email": email, "error": "email is required", "attempted": False}
         existing = self.find_token_by_email(email)
+        if existing:
+            status = str((self.get_account(existing) or {}).get("status") or "")
+            if status != "异常":
+                # Already in the pool and working: importing it again is a mistake, don't log in twice.
+                return {"ok": True, "email": email, "skipped": True, "error": f"已在号池（{status or '正常'}），跳过", "attempted": False}
         if existing and not password:
             password = str((self.get_account(existing) or {}).get("password") or "").strip()
         if not password and not self.has_mailbox_route(email):

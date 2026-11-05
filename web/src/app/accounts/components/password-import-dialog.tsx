@@ -194,8 +194,8 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
                       <div className="flex items-center gap-2">
                         <span className="truncate text-sm font-medium text-stone-700">{item.email}</span>
                         {item.ok ? (
-                          <Badge variant="success" className="rounded-md">
-                            {item.updated ? "已更新" : "已新增"}
+                          <Badge variant={item.skipped ? "secondary" : "success"} className="rounded-md">
+                            {item.skipped ? "已在号池，跳过" : item.updated ? "已更新" : "已新增"}
                           </Badge>
                         ) : (
                           <Badge variant="danger" className="rounded-md">
@@ -222,7 +222,7 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
               onChange={(event) => setText(event.target.value)}
               className="min-h-48 rounded-xl border-stone-200 font-mono text-xs"
             />
-            <div className="text-xs text-stone-500">识别到 {lineCount} 个账号（同一邮箱只取第一行；号池里已有的账号会重新登录）。</div>
+            <div className="text-xs text-stone-500">识别到 {lineCount} 个账号（同一邮箱只取第一行；号池里已有且没坏的账号会跳过，状态为「异常」的会重新登录）。</div>
           </div>
         )}
 

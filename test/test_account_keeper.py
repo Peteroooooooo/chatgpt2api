@@ -256,6 +256,15 @@ class KeeperTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(passwords, ["saved"])
 
+    def test_import_skips_account_already_working_in_pool(self):
+        for status in ("正常", "限流", "禁用"):
+            service = PatrolService([{"access_token": token("w"), "email": "w@040601.xyz", "status": status}], routed_domain="040601.xyz")
+            result = service.login_and_add_account("W@040601.xyz", "pw")
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["skipped"])
+            self.assertFalse(result["attempted"])
+            self.assertEqual(service.logins, [])
+
     def test_login_and_add_new_account(self):
         service = PatrolService([])
         result = service.login_and_add_account("new@040601.com", "pw")
