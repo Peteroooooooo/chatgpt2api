@@ -1983,28 +1983,82 @@ class OpenAIBackendAPI:
         return response.json()
 
     def _extract_search_result(self, conversation_id: str, conversation: Dict[str, Any]) -> Dict[str, Any]:
-        messages = []
-        for node in (conversation.get("mapping") or {}).values():
-            message = (node or {}).get("message") or {}
-            if ((message.get("author") or {}).get("role") or "") == "assistant":
-                messages.append(message)
-        message = max(messages, key=lambda item: float(item.get("create_time") or 0.0)) if messages else {}
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        finish_details = metadata.get("finish_details") if isinstance(metadata.get("finish_details"), dict) else {}
-        answer = self._search_message_text(message)
-        sources = self._extract_search_sources(message)
+        chain = self._search_turn_chain(conversation)
+        if chain is None:
+            # No usable current_node: fall back to the newest assistant message.
+            messages = []
+            for node in (conversation.get("mapping") or {}).values():
+                message = (node or {}).get("message") or {}
+                if ((message.get("author") or {}).get("role") or "") == "assistant":
+                    messages.append(message)
+            message = max(messages, key=lambda item: float(item.get("create_time") or 0.0)) if messages else {}
+            segments = [message] if message else []
+            status = self._search_message_status(message)
+        else:
+            # A long reply can be split into several "final" segments with tool
+            # calls between them; the answer is all of them in chain order.
+            segments = [item for item in chain if self._is_search_final_message(item) and self._search_message_text(item)]
+            message = segments[-1] if segments else (chain[-1] if chain else {})
+            tip = chain[-1] if chain else {}
+            # Later non-final messages mean the model is still working on the reply.
+            status = self._search_message_status(message) if tip is message else ""
+        answer = "\n\n".join(self._search_message_text(item) for item in segments).strip()
+        sources: list[Dict[str, str]] = []
+        for segment in segments:
+            for source in self._extract_search_sources(segment):
+                if all(item["url"] != source["url"] for item in sources):
+                    sources.append(source)
         for url in SEARCH_URL_RE.findall(answer):
             url = self._clean_search_url(url)
             if url and all(item["url"] != url for item in sources):
                 sources.append({"title": "", "url": url, "snippet": "", "source_type": ""})
         return {
             "conversation_id": conversation_id,
-            "status": str(finish_details.get("type") or metadata.get("status") or self._find_search_value(message, "status") or "").strip(),
+            "status": status,
             "answer": answer,
             "sources": sources,
             "assistant_message_id": str(message.get("id") or ""),
             "create_time": float(message.get("create_time") or 0.0),
         }
+
+    @staticmethod
+    def _search_turn_chain(conversation: Dict[str, Any]) -> list[Dict[str, Any]] | None:
+        """Messages after the user prompt, oldest first, following parents from current_node."""
+        mapping = conversation.get("mapping")
+        node_id = str(conversation.get("current_node") or "")
+        if not isinstance(mapping, dict) or not node_id or node_id not in mapping:
+            return None
+        chain: list[Dict[str, Any]] = []
+        seen: set[str] = set()
+        while node_id and node_id not in seen and isinstance(mapping.get(node_id), dict):
+            seen.add(node_id)
+            node = mapping[node_id]
+            message = node.get("message") if isinstance(node.get("message"), dict) else {}
+            if ((message.get("author") or {}).get("role") or "") == "user":
+                break
+            if message:
+                chain.append(message)
+            node_id = str(node.get("parent") or "")
+        chain.reverse()
+        return chain
+
+    @staticmethod
+    def _is_search_final_message(message: Dict[str, Any]) -> bool:
+        if ((message.get("author") or {}).get("role") or "") != "assistant":
+            return False
+        channel = str(message.get("channel") or "").strip().lower()
+        if channel:
+            return channel == "final"
+        content = message.get("content") if isinstance(message.get("content"), dict) else {}
+        recipient = str(message.get("recipient") or "all").strip().lower()
+        return recipient == "all" and str(content.get("content_type") or "") == "text"
+
+    def _search_message_status(self, message: Dict[str, Any]) -> str:
+        if not message:
+            return ""
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        finish_details = metadata.get("finish_details") if isinstance(metadata.get("finish_details"), dict) else {}
+        return str(finish_details.get("type") or metadata.get("status") or self._find_search_value(message, "status") or "").strip()
 
     def _extract_search_sources(self, payload: Any) -> list[Dict[str, str]]:
         sources: list[Dict[str, str]] = []
