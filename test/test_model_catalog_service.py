@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from services.account_service import AccountService
+from services.model_rules import ModelRulesStore
 from services.model_service import ModelCatalogService
 from services.storage.json_storage import JSONStorageBackend
 
@@ -80,6 +81,8 @@ class ModelCatalogServiceTests(unittest.TestCase):
             ),
             cache_ttl_seconds=300,
             clock=lambda: self.now,
+            # These tests cover fetching and caching; every model is exposed. Rules: test_model_rules.py
+            rules=ModelRulesStore(None, default_policy="all_exposed"),
         )
 
     def test_catalog_unions_anonymous_and_each_active_account_type(self) -> None:
