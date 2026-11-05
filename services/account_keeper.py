@@ -99,6 +99,15 @@ class AccountKeeper:
         """Force a session_token / refresh_token renewal. Returns (new_token, error)."""
         return self.accounts.force_renew(token, "patrol")
 
+    @staticmethod
+    def _mailbox_routes(email: str) -> bool:
+        try:
+            from services.mailbox.service import mailbox_service
+
+            return mailbox_service.resolve(email) is not None
+        except Exception:
+            return False
+
     def _relogin(self, token: str, account: dict) -> tuple[str, str]:
         email = str(account.get("email") or "").strip()
         before = self.accounts.get_account(token) or {}
@@ -152,11 +161,12 @@ class AccountKeeper:
             )
 
         if need_relogin:
-            if not has_password or not email:
+            can_use_code = bool(email) and self._mailbox_routes(email)
+            if not email or (not has_password and not can_use_code):
                 entry["result"] = "needs_manual"
-                entry["error"] = entry.get("refresh_error") or "no email/password stored, cannot re-login"
+                entry["error"] = entry.get("refresh_error") or "no password and no mailbox route, cannot re-login"
                 return entry
-            entry["actions"].append("relogin")
+            entry["actions"].append("relogin" if has_password else "relogin_email_code")
             token, error = self._relogin(token, self.accounts.get_account(token) or account)
             entry["result"] = "relogin_failed" if error else "relogged_in"
             entry["error"] = error[:300]
