@@ -1133,6 +1133,80 @@ export async function saveKeeperSettings(settings: Partial<KeeperSettings>) {
   });
 }
 
+export type DailyChatSettings = {
+  enabled: boolean;
+  window_start: string;
+  window_end: string;
+  min_gap_minutes: number;
+  include_limited: boolean;
+  keep_days: number;
+};
+
+export type DailyChatItemState = "pending" | "running" | "done" | "skipped";
+
+export type DailyChatItem = {
+  id: string;
+  key: string;
+  email: string;
+  label: string;
+  scheduled_at: string | null;
+  planned_at: string | null;
+  state: DailyChatItemState;
+  rescheduled?: boolean;
+  skip_kind?: "ineligible" | "window" | "interrupted";
+  reason?: string;
+  trigger?: "schedule" | "manual";
+  started_at?: string;
+  finished_at?: string;
+  duration_seconds?: number;
+  result?: string;
+  error?: string;
+  prompt?: string;
+  prompt_id?: string;
+  conversation_url?: string;
+};
+
+export type DailyChatPlan = {
+  date: string;
+  created_at?: string;
+  rescheduled_at?: string;
+  window?: string;
+  min_gap_minutes?: number;
+  items: DailyChatItem[];
+  counts?: Record<string, number>;
+};
+
+export type DailyChatOverview = {
+  settings: DailyChatSettings;
+  today: DailyChatPlan | null;
+  counts: Record<string, number>;
+  next_item_at: string | null;
+  days: { date: string; counts: Record<string, number> }[];
+};
+
+export async function fetchDailyChat() {
+  return httpRequest<DailyChatOverview>("/api/daily-chat");
+}
+
+export async function saveDailyChatSettings(settings: Partial<DailyChatSettings>) {
+  return httpRequest<DailyChatOverview>("/api/daily-chat/settings", {
+    method: "POST",
+    body: settings,
+  });
+}
+
+export async function rescheduleDailyChat() {
+  return httpRequest<DailyChatOverview>("/api/daily-chat/reschedule", { method: "POST" });
+}
+
+export async function runDailyChatItem(itemId: string) {
+  return httpRequest<{ item: DailyChatItem }>(`/api/daily-chat/items/${encodeURIComponent(itemId)}/run`, { method: "POST" });
+}
+
+export async function fetchDailyChatDay(day: string) {
+  return httpRequest<DailyChatPlan>(`/api/daily-chat/days/${encodeURIComponent(day)}`);
+}
+
 export async function runPatrolNow() {
   return httpRequest<Partial<PatrolRun> & { state: string }>("/api/keeper/patrol/run", {
     method: "POST",
