@@ -219,6 +219,10 @@ class AccountService:
         normalized = dict(item)
         normalized.pop("accessToken", None)
         normalized["access_token"] = access_token
+        # The token's own exp is the truth; a stored copy goes stale when a relogin swaps the token.
+        exp = self._jwt_exp(access_token)
+        if exp > 0:
+            normalized["access_token_expires_at"] = datetime.fromtimestamp(exp, timezone.utc).isoformat()
         if str(normalized.get("type") or "").strip().lower() == "codex":
             normalized["export_type"] = "codex"
             normalized.pop("type", None)

@@ -47,24 +47,51 @@ export function TestChip({
   checkedAt,
   error,
   running,
+  onRun,
+  disabled,
 }: {
   label: string;
   status?: TestStatus;
   checkedAt?: string | null;
   error?: string | null;
   running?: boolean;
+  onRun?: () => void;
+  disabled?: boolean;
 }) {
   const meta = testChipMeta(status, Boolean(running));
   const when = status && status !== "未测试" && checkedAt ? ` · ${ago(checkedAt)}` : "";
-  const title = `${label}测试：${meta.text}${when}${error ? `\n${error}` : ""}`;
-  return (
-    <span
-      title={title}
-      className="inline-flex h-[22px] items-center gap-1 rounded-md border border-stone-200 bg-white px-1.5 text-xs whitespace-nowrap text-stone-600"
-    >
+  const title = `${label}测试：${meta.text}${when}${error ? `\n${error}` : ""}${onRun && !running ? "\n点击运行" : ""}`;
+  const className =
+    "inline-flex h-[22px] items-center gap-1 rounded-md border border-stone-200 bg-white px-1.5 text-xs whitespace-nowrap text-stone-600";
+  const content = (
+    <>
       <span className={cn("size-1.5 rounded-full", meta.dot)} />
       {label.slice(0, 1)} {meta.text}
-    </span>
+    </>
+  );
+  if (!onRun) {
+    return (
+      <span title={title} className={className}>
+        {content}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={disabled || running}
+      onClick={(event) => {
+        event.stopPropagation();
+        onRun();
+      }}
+      className={cn(
+        className,
+        "cursor-pointer transition hover:border-stone-300 hover:bg-stone-50 dark:hover:bg-white/10 disabled:cursor-default disabled:hover:bg-white",
+      )}
+    >
+      {content}
+    </button>
   );
 }
 
@@ -244,6 +271,8 @@ export function AccountsTable({ rows, selected, busy, actions, onToggle, onToggl
                     checkedAt={account.chat_test_checked_at}
                     error={account.chat_test_error}
                     running={busy.chat.has(token)}
+                    disabled={busy.realChat.has(token)}
+                    onRun={() => actions.quickTest(token)}
                   />
                   <TestChip
                     label="真实对话"
@@ -251,6 +280,8 @@ export function AccountsTable({ rows, selected, busy, actions, onToggle, onToggl
                     checkedAt={account.real_chat_test_checked_at}
                     error={account.real_chat_test_error}
                     running={busy.realChat.has(token)}
+                    disabled={busy.chat.has(token)}
+                    onRun={() => actions.realTest(token)}
                   />
                 </div>
               </td>
