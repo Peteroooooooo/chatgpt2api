@@ -207,7 +207,7 @@ export function MailboxRoutingCard() {
   const applySettings = (data: MailboxSettings) => {
     setSaved(data);
     setRouteRows(toRouteRows(data.routes || []));
-    setOtpTimeout(String(data.otp_timeout_seconds ?? 120));
+    setOtpTimeout(String(data.otp_timeout_seconds ?? 180));
     setPollInterval(String(data.poll_interval_seconds ?? 5));
   };
 
@@ -255,7 +255,7 @@ export function MailboxRoutingCard() {
       routes: routeRows
         .map((row) => ({ match: row.match.trim().toLowerCase(), provider: row.provider }))
         .filter((row) => row.match && row.provider),
-      otp_timeout_seconds: Number.isFinite(timeout) && timeout > 0 ? Math.round(timeout) : saved?.otp_timeout_seconds ?? 120,
+      otp_timeout_seconds: Number.isFinite(timeout) && timeout > 0 ? Math.round(timeout) : saved?.otp_timeout_seconds ?? 180,
       poll_interval_seconds:
         Number.isFinite(interval) && interval > 0 ? Math.round(interval) : saved?.poll_interval_seconds ?? 5,
     };
@@ -653,7 +653,7 @@ export function MailboxRoutingCard() {
 
                 <div className="grid gap-3 pt-1 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-stone-700">验证码等待秒数</label>
+                    <label className="text-sm font-medium text-stone-700">验证码等待秒数（超时结束本次导入）</label>
                     <Input
                       type="number"
                       min={10}

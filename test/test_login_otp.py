@@ -76,19 +76,21 @@ class LoginOtpTests(unittest.TestCase):
         self.assertEqual(session.gets[0], "https://auth.openai.com/email-verification")
         self.assertEqual(session.posts, [(VALIDATE_OTP_URL, {"code": "123456"})])
 
-    def test_rejected_code_is_excluded_on_retry(self):
+    def test_rejected_code_ends_the_import(self):
         session = FakeSession([Response(401, {"error": "bad"}), Response(200, {"continue_url": CALLBACK})])
         mailbox = FakeMailbox(["111111", "222222"])
         result = complete_email_otp(session, "a@x.com", LOGIN_DATA, {}, START, mailbox)
-        self.assertTrue(result["ok"])
-        self.assertEqual(mailbox.excludes[1], {"111111"})
+        self.assertEqual(result["error"], "otp_validate_failed_401")
+        self.assertEqual(len(mailbox.excludes), 1)
+        self.assertEqual(session.posts, [(VALIDATE_OTP_URL, {"code": "111111"})])
 
-    def test_timeout_triggers_resend_then_fails(self):
+    def test_timeout_ends_without_resend(self):
         session = FakeSession([])
-        mailbox = FakeMailbox([MailboxError("none"), MailboxError("still none")])
+        mailbox = FakeMailbox([MailboxError("none")])
         result = complete_email_otp(session, "a@x.com", LOGIN_DATA, {}, START, mailbox)
         self.assertEqual(result["error"], "otp_not_received")
-        self.assertIn("https://auth.openai.com/api/accounts/email-otp/send", session.gets)
+        self.assertNotIn("https://auth.openai.com/api/accounts/email-otp/send", session.gets)
+        self.assertEqual(len(mailbox.excludes), 1)
 
     def test_no_route_keeps_original_error(self):
         result = complete_email_otp(FakeSession([]), "a@x.com", LOGIN_DATA, {}, START, FakeMailbox([], routed=False))

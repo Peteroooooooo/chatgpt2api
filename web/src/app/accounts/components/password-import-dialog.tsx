@@ -22,6 +22,22 @@ const CREDENTIAL_LINE = /^([^\s:|]+@[^\s:|]+?)(?:----|[\t|:]|\s+)(.+)$/;
 const EMAIL_ONLY_LINE = /^([^\s:|@]+@[^\s:|@]+\.[^\s:|@-]+)$/;
 const POLL_INTERVAL_MS = 2000;
 
+function importErrorMessage(error?: string | null, detail?: string) {
+  if (detail?.includes("invalid_state") || error === "invalid_state") {
+    return "上游登录会话已失效，请重试或使用浏览器 OAuth 授权导入。";
+  }
+  if (error === "otp_not_received") {
+    return "等待验证码超时：程序未能在设定时间内读到本次登录的有效验证码。邮件可能延迟到达，请核对收件时间和收件路由后重试，或使用浏览器 OAuth 授权导入。";
+  }
+  if (error?.startsWith("profile_completion_failed") || error === "profile_no_continue_url") {
+    return "注册资料未能提交成功，请使用浏览器 OAuth 授权完成注册后导入。";
+  }
+  if (error?.startsWith("no_mailbox_route")) {
+    return "未配置这个邮箱的收件路由，请先到「巡检 → 邮箱与路由」配置。";
+  }
+  return error || detail;
+}
+
 function countCredentialLines(text: string) {
   const seen = new Set<string>();
   for (const raw of text.split(/\r?\n/)) {
@@ -94,9 +110,9 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
             const ok = next.items.filter((item) => item.ok).length;
             const failed = next.items.length - ok;
             if (failed > 0) {
-              toast.warning(`邮箱登录导入完成：成功 ${ok} 个，失败 ${failed} 个`);
+              toast.warning(`邮箱导入完成：成功 ${ok} 个，失败 ${failed} 个`);
             } else {
-              toast.success(`邮箱登录导入完成：成功 ${ok} 个`);
+              toast.success(`邮箱导入完成：成功 ${ok} 个`);
             }
             onFinishedRef.current();
           }
@@ -149,24 +165,31 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
           disabled={disabled}
         >
           {isRunning ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-          {isRunning && job ? `邮箱登录导入 ${job.done}/${job.total}` : "邮箱登录导入"}
+          {isRunning && job ? `邮箱导入 ${job.done}/${job.total}` : "邮箱登录 / 注册导入"}
         </Button>
       )}
       <DialogContent showCloseButton={false} className="max-h-[90vh] overflow-y-auto rounded-2xl p-6">
         <DialogHeader className="gap-2">
-          <DialogTitle>邮箱登录导入</DialogTitle>
+          <DialogTitle>邮箱登录 / 注册导入</DialogTitle>
           <DialogDescription className="text-sm leading-6">
-            一行一个邮箱，系统会一个个登录。没有密码就只写邮箱，用邮箱验证码登录，这个域名要在「巡检 → 邮箱与路由」里配了收件；有密码写成
-            邮箱----密码（也支持 : | 制表符 空格 分隔）。
+            一行一个邮箱。系统根据 OpenAI 返回的流程登录已有账号，或继续新邮箱的注册，成功后保存自动续期凭据并加入号池。
           </DialogDescription>
         </DialogHeader>
+
+        {!job ? (
+          <div className="space-y-2 rounded-xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
+            <p><span className="font-medium text-stone-800">已有账号：</span>使用邮箱验证码登录；有密码也可填写「邮箱----密码」。</p>
+            <p><span className="font-medium text-stone-800">全新邮箱：</span>上游进入注册流程并通过验证码后，自动填写 8 位随机英文字母姓名和 20–60 岁随机年龄，再完成注册和导入。</p>
+            <p>只填写邮箱时，需先在「巡检 → 邮箱与路由」配置收件。未收到验证码或注册失败时，可从「添加账号 → 导入 Token / Session 等 → OAuth 登录」使用浏览器完成授权。</p>
+          </div>
+        ) : null}
 
         {job ? (
           <div className="space-y-3">
             <div className="rounded-lg border border-stone-200 bg-white px-3 py-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm font-medium text-stone-700">
-                  {isRunning ? "正在登录" : "已完成"}，已处理 {job.done}/{job.total}
+                  {isRunning ? "正在登录 / 注册并导入" : "已完成"}，已处理 {job.done}/{job.total}
                 </div>
                 <Badge variant={isRunning ? "info" : failCount > 0 ? "warning" : "success"} className="rounded-md">
                   {progress}%
@@ -204,8 +227,8 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
                         )}
                       </div>
                       {!item.ok && (item.error || item.detail) ? (
-                        <div className="text-xs break-all text-rose-600" title={item.detail || undefined}>
-                          {item.error || item.detail}
+                        <div className="text-xs break-all text-rose-600" title={item.detail || item.error || undefined}>
+                          {importErrorMessage(item.error, item.detail)}
                         </div>
                       ) : null}
                     </div>

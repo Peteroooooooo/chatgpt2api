@@ -6,6 +6,7 @@ from typing import Callable
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from services.mailbox.base import MailboxError
+from services.login_profile import complete_about_you, is_about_you_url
 
 AUTH_BASE = "https://auth.openai.com"
 SEND_OTP_URL = f"{AUTH_BASE}/api/accounts/email-otp/send"
@@ -43,6 +44,32 @@ def follow_to_auth_code(session, start_url: str, headers: dict) -> tuple[str, st
     return code_from_url(url), url
 
 
+OTP_ATTEMPTS = 3
+
+
+def validate_code_from_mail(session, mailbox, email: str, started_at: datetime, headers: dict):
+    """Wait for the mailed code and submit it.
+
+    A code from an earlier attempt can still sit inside the mailbox time window;
+    OpenAI rejects it as wrong_email_otp_code, so that code is skipped and the
+    next mail is used. Returns the validate response, or raises MailboxError.
+    """
+    response = None
+    for _ in range(OTP_ATTEMPTS):
+        otp = mailbox.wait_for_code(email, started_at)
+        response = session.post(VALIDATE_OTP_URL, headers=headers, json={"code": otp}, timeout=30)
+        if hasattr(mailbox, "mark_used"):
+            mailbox.mark_used(email, otp)
+        if response.status_code == 200 or _error_code(response) != "wrong_email_otp_code":
+            return response
+    return response
+
+
+def _error_code(response) -> str:
+    error = _json(response).get("error")
+    return str(error.get("code") or "") if isinstance(error, dict) else ""
+
+
 def complete_email_otp(
     session,
     email: str,
@@ -68,39 +95,33 @@ def complete_email_otp(
             pass
 
     otp_headers = {**headers, "referer": f"{AUTH_BASE}/email-verification"}
-    rejected: set[str] = set()
-    for attempt in range(2):
-        try:
-            otp = mailbox.wait_for_code(email, started_at, exclude=rejected)
-        except MailboxError as exc:
-            if attempt == 0:
-                try:
-                    session.get(SEND_OTP_URL, headers=otp_headers, timeout=30)
-                except Exception:
-                    pass
-                continue
-            return {"ok": False, "error": "otp_not_received", "detail": {"reason": str(exc)}}
+    try:
+        response = validate_code_from_mail(session, mailbox, email, started_at, otp_headers)
+    except MailboxError as exc:
+        return {"ok": False, "error": "otp_not_received", "detail": {"reason": str(exc)}}
 
-        response = session.post(VALIDATE_OTP_URL, headers=otp_headers, json={"code": otp}, timeout=30)
-        try:
-            data = response.json() if response.text else {}
-        except Exception:
-            data = {}
-        if response.status_code != 200:
-            rejected.add(otp)
-            if attempt == 0:
-                continue
-            return {"ok": False, "error": f"otp_validate_failed_{response.status_code}", "detail": data or response.text[:300]}
+    try:
+        data = response.json() if response.text else {}
+    except Exception:
+        data = {}
+    if response.status_code != 200:
+        if _error_code(response) == "account_deactivated":
+            return {"ok": False, "error": "account_deactivated", "detail": data}
+        return {"ok": False, "error": f"otp_validate_failed_{response.status_code}", "detail": data or response.text[:300]}
 
-        next_url = str((data or {}).get("continue_url") or "").strip()
-        if not next_url:
-            return {"ok": False, "error": "otp_no_continue_url", "detail": data}
-        code, last_url = follow_to_auth_code(session, next_url, page_headers)
-        if not code:
-            page = (data or {}).get("page") if isinstance(data, dict) else None
-            return {"ok": False, "error": "otp_no_auth_code", "detail": {"last_url": last_url[:300], "page": page}}
-        return {"ok": True, "code": code}
-    return {"ok": False, "error": "otp_not_received", "detail": {}}
+    next_url = str((data or {}).get("continue_url") or "").strip()
+    if not next_url:
+        return {"ok": False, "error": "otp_no_continue_url", "detail": data}
+    code, last_url = follow_to_auth_code(session, next_url, page_headers)
+    if not code and is_about_you_url(last_url):
+        profile_result = complete_about_you(session, headers)
+        if not profile_result.get("ok"):
+            return profile_result
+        code, last_url = follow_to_auth_code(session, profile_result["continue_url"], page_headers)
+    if not code:
+        page = (data or {}).get("page") if isinstance(data, dict) else None
+        return {"ok": False, "error": "otp_no_auth_code", "detail": {"last_url": last_url[:300], "page": page}}
+    return {"ok": True, "code": code}
 
 
 def _json(response) -> dict:

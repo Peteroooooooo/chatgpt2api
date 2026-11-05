@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -18,7 +19,8 @@ PROVIDER_CLASSES: dict[str, type[MailboxProvider]] = {
     ImapProvider.kind: ImapProvider,
 }
 SECRET_FIELDS = {"admin_password", "site_password", "client_secret", "refresh_token", "password"}
-DEFAULTS = {"otp_timeout_seconds": 120, "poll_interval_seconds": 5}
+DEFAULTS = {"otp_timeout_seconds": 180, "poll_interval_seconds": 5}
+USED_CODE_SECONDS = 15 * 60
 
 
 def _domain_matches(domain: str, rule: str) -> bool:
@@ -44,6 +46,7 @@ class MailboxService:
         self._file = self._load()
         self._data = self._merge()
         self._instances: dict[str, MailboxProvider] = {}
+        self._used: dict[str, dict[str, float]] = {}
 
     @staticmethod
     def _read_env() -> dict:
@@ -193,15 +196,31 @@ class MailboxService:
         provider = self.resolve(address)
         if provider is None:
             raise MailboxError(f"no mailbox route for {address}")
+        # A code used a moment ago is still inside the clock-skew window; never hand it out twice.
+        skip = set(exclude or ()) | self.used_codes(address)
         return wait_for_code(
             provider,
             address,
             since,
-            timeout=float(self._data.get("otp_timeout_seconds") or 120),
+            timeout=float(self._data.get("otp_timeout_seconds") or 180),
             interval=float(self._data.get("poll_interval_seconds") or 5),
             require_recipient_match=bool(provider.settings.get("require_recipient_match", True)),
-            exclude=exclude,
+            exclude=skip,
         )
+
+    def mark_used(self, address: str, code: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            used = self._used.setdefault(str(address).strip().lower(), {})
+            used[str(code)] = now
+            for key in [key for key, at in used.items() if now - at > USED_CODE_SECONDS]:
+                del used[key]
+
+    def used_codes(self, address: str) -> set[str]:
+        now = time.monotonic()
+        with self._lock:
+            used = self._used.get(str(address).strip().lower(), {})
+            return {code for code, at in used.items() if now - at <= USED_CODE_SECONDS}
 
     def test(self, name: str) -> dict:
         with self._lock:

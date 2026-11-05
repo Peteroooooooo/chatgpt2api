@@ -26,6 +26,11 @@ from services.real_chat_test_prompts import (
 from utils.helper import anonymize_token
 
 
+def _url_path(url: str) -> str:
+    from urllib.parse import urlparse
+
+    return urlparse(str(url)).path.rstrip("/")
+
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
 
@@ -591,6 +596,9 @@ class AccountService:
         "push_auth_timeout",
         "need_verification_code",
         "password_required",
+        "account_not_registered",
+        "password_not_set",
+        "account_deactivated",
     })
     _RELOGIN_FORCED_EVENTS = {"manual_relogin", "patrol"}
     _relogin_inflight: set[str] = set()
@@ -607,10 +615,10 @@ class AccountService:
     def relogin_credentials(self, account: dict) -> tuple[str, str] | None:
         """(email, password) to log in with; password is "" for an email-code login. None if impossible."""
         email = str(account.get("email") or "").strip()
-        password = str(account.get("password") or "").strip()
+        password = str(account.get("password") or "")
         if not email:
             return None
-        if password:
+        if password.strip():
             return email, password
         if not self.relogin_without_password:
             return None
@@ -848,6 +856,7 @@ class AccountService:
                 "device_id": device_id,
                 # Without a password, a login_hint lands on the sign-up email check (code accepted,
                 # then "about you" + registration_disallowed). Plain login + submitting the email works.
+                # New emails are registered beforehand through chatgpt.com (services/signup.py).
                 "screen_hint": "login_or_signup" if password else "login",
                 "max_age": "0",
                 **({"login_hint": email} if password else {}),
@@ -886,6 +895,10 @@ class AccountService:
             
             # 检测最终 URL 是否指向错误页面
             final_url = str(resp.url)
+            if password and _url_path(final_url) == "/email-verification":
+                # With login_hint an existing account lands on /log-in/password; a new email lands
+                # on the passwordless sign-up check, whose code this client never gets mailed.
+                return {"ok": False, "error": "account_not_registered", "detail": {"url": final_url[:200]}}
             if "/error" in final_url and "payload=" in final_url:
                 from urllib.parse import parse_qs, urlparse
                 try:
@@ -945,6 +958,9 @@ class AccountService:
                         page = (login_resp.json() or {}).get("page") or {}
                     except Exception:
                         page = {}
+                    payload = page.get("payload") if isinstance(page.get("payload"), dict) else {}
+                    if payload.get("email_verification_mode") == "passwordless_signup":
+                        return {"ok": False, "error": "account_not_registered", "detail": {"page": page.get("type")}}
                     if str(page.get("type") or "") == "login_password":
                         # Open the password page like a browser before asking for a one-time code.
                         try:
@@ -963,6 +979,9 @@ class AccountService:
                             timeout=30,
                         )
                         if login_resp.status_code != 200:
+                            # An email with no OpenAI account gets the password page, then 409 invalid_state here.
+                            if login_resp.status_code == 409:
+                                return {"ok": False, "error": "account_not_registered", "detail": {"send_otp_status": 409}}
                             return {"ok": False, "error": "password_required", "detail": {"send_otp_status": login_resp.status_code, "text": login_resp.text[:300]}}
             
             login_data = {}
@@ -983,8 +1002,14 @@ class AccountService:
                     return {"ok": False, "error": "unsupported_country_region_territory", "detail": login_data}
                 elif error_code == "invalid_state":
                     return {"ok": False, "error": "invalid_state", "detail": login_data}
+                elif error_code == "password_reset_required" and password:
+                    # The account has no password (created by email code); log in with a code instead.
+                    return {"ok": False, "error": "password_not_set", "detail": login_data}
                 elif "Invalid credentials" in error_msg or "wrong password" in error_msg.lower():
                     return {"ok": False, "error": "invalid_password", "detail": login_data}
+                elif error_code == "invalid_auth_step" and password:
+                    # Seen for an email with no account that was still shown the password page.
+                    return {"ok": False, "error": "password_step_rejected", "detail": login_data}
                 return {"ok": False, "error": f"password_verify_failed_{login_resp.status_code}", "detail": login_data}
             
             # 获取 authorization code
@@ -1035,8 +1060,14 @@ class AccountService:
                     login_via = "email_code"
                 elif continue_url:
                     from services.login_otp import follow_to_auth_code
+                    from services.login_profile import complete_about_you, is_about_you_url
 
                     auth_code, last_url = follow_to_auth_code(session, continue_url, login_headers)
+                    if not auth_code and is_about_you_url(last_url):
+                        profile_result = complete_about_you(session, login_headers)
+                        if not profile_result.get("ok"):
+                            return profile_result
+                        auth_code, last_url = follow_to_auth_code(session, profile_result["continue_url"], login_headers)
                     if not auth_code:
                         return {"ok": False, "error": "no_auth_code", "detail": {**login_data, "last_url": last_url[:300]}}
                 else:
@@ -2191,7 +2222,10 @@ class AccountService:
     def login_and_add_account(self, email: str, password: str = "") -> dict:
         """Log in and add or update the account. Without a password the login uses an email code."""
         email = str(email or "").strip()
-        password = str(password or "").strip()
+        # Passwords are kept exactly as typed: leading or trailing spaces can be part of them.
+        password = str(password or "")
+        if not password.strip():
+            password = ""
         if not email or "@" not in email:
             return {"ok": False, "email": email, "error": "email is required", "attempted": False}
         existing = self.find_token_by_email(email)
@@ -2201,7 +2235,9 @@ class AccountService:
                 # Already in the pool and working: importing it again is a mistake, don't log in twice.
                 return {"ok": True, "email": email, "skipped": True, "error": f"已在号池（{status or '正常'}），跳过", "attempted": False}
         if existing and not password:
-            password = str((self.get_account(existing) or {}).get("password") or "").strip()
+            password = str((self.get_account(existing) or {}).get("password") or "")
+            if not password.strip():
+                password = ""
         if not password and not self.has_mailbox_route(email):
             return {"ok": False, "email": email, "error": "no_mailbox_route: 这个域名没有配置收件，收不到验证码", "attempted": False}
         if existing:
@@ -2211,9 +2247,26 @@ class AccountService:
             account = self.get_account(self.find_token_by_email(email) or existing) or {}
             ok = account.get("status") == "正常" and not account.get("last_relogin_error")
             return {"ok": ok, "email": email, "updated": True, "error": account.get("last_relogin_error")}
+        typed_password = password
         result = self._login_with_password(email, password, self.push_auth_wait_seconds)
+        # An account created without a password answers a password login like a new email
+        # (account_not_registered) or with password_not_set; an email code logs it in. For a
+        # really new email the code login stops at the sign-up page before any mail is sent.
+        fallback_errors = ("password_not_set", "account_not_registered", "password_step_rejected")
+        if password and not result.get("ok") and result.get("error") in fallback_errors and self.has_mailbox_route(email):
+            password = ""
+            result = self._login_with_password(email, "", self.push_auth_wait_seconds)
+        signup: dict = {}
+        if result.get("error") == "account_not_registered":
+            # Only a new email reaches this: register it through chatgpt.com, then log in normally.
+            signup = self._register_if_new(email, typed_password)
+            if not signup.get("ok"):
+                return {"ok": False, "email": email, "error": signup.get("error"), "detail": signup.get("detail")}
+            # OpenAI decides whether sign-up asks for a password; without one a stored password would only fail later.
+            password = typed_password if signup.get("password_set") else ""
+            result = self._login_with_password(email, password, self.push_auth_wait_seconds)
         if not result.get("ok"):
-            return {"ok": False, "email": email, "error": result.get("error"), "detail": result.get("detail")}
+            return {"ok": False, "email": email, "error": result.get("error"), "detail": result.get("detail"), "registered": bool(signup.get("created"))}
         token = str(result.get("access_token") or "")
         self.add_account_items([{
             "access_token": token,
@@ -2224,7 +2277,30 @@ class AccountService:
             "source_type": "password",
         }])
         self.refresh_accounts([token])
-        return {"ok": True, "email": email, "added": True}
+        return {"ok": True, "email": email, "added": True, "registered": bool(signup.get("created"))}
+
+    def _register_if_new(self, email: str, password: str) -> dict:
+        """Create the ChatGPT account through chatgpt.com when the email has none yet."""
+        from curl_cffi import requests
+
+        from services.mailbox.service import mailbox_service
+        from services.proxy_service import proxy_settings
+        from services.signup import register_account
+        from utils.sentinel import build_sentinel_token
+
+        session = requests.Session(**proxy_settings.build_session_kwargs(impersonate="chrome110", verify=False, upstream=True))
+        try:
+            return register_account(
+                session,
+                email,
+                password,
+                mailbox_service,
+                sentinel=lambda device_id, flow: build_sentinel_token(session, device_id, flow, solve_turnstile=True),
+            )
+        except Exception as exc:
+            return {"ok": False, "error": "signup_failed", "detail": {"reason": str(exc)}}
+        finally:
+            session.close()
 
     def re_login_accounts(self, access_tokens: list[str], progress_id: str | None = None) -> dict[str, Any]:
         """对选中账号执行密码重新登录流程。
@@ -2330,8 +2406,8 @@ class AccountService:
                 "expired": self._timestamp_to_iso(access_payload.get("exp")),
                 "last_refresh": self._timestamp_to_iso(access_payload.get("iat")),
             }
-            password = str(account.get("password") or "").strip()
-            if password:
+            password = str(account.get("password") or "")
+            if password.strip():
                 item["password"] = password
             items.append(item)
         return items

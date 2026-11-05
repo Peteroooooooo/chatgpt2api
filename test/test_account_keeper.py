@@ -24,6 +24,9 @@ class PatrolService(AccountService):
         self.routed_domain = routed_domain
         self.logins: list[str] = []
         self.push_waits: list[int] = []
+        self.signups: list[tuple[str, str]] = []
+        self.signup_result = {"ok": True, "created": True, "password_set": True}
+        self.unregistered: set[str] = set()
 
     def relogin_credentials(self, account):
         email = str(account.get("email") or "")
@@ -45,9 +48,17 @@ class PatrolService(AccountService):
     def _login_with_password(self, email, password, push_wait_seconds=0):
         self.logins.append(email)
         self.push_waits.append(push_wait_seconds)
+        if email in self.unregistered:
+            return {"ok": False, "error": "account_not_registered"}
         if not self.login_ok:
             return {"ok": False, "error": self.login_error}
         return {"ok": True, "email": email, "access_token": token("login-" + email), "refresh_token": "rt-new", "id_token": ""}
+
+    def _register_if_new(self, email, password):
+        self.signups.append((email, password))
+        if self.signup_result.get("ok"):
+            self.unregistered.discard(email)
+        return dict(self.signup_result)
 
     def refresh_accounts(self, access_tokens, progress_id=None, defer_invalid_removal=True):
         return {"refreshed": 0, "errors": [], "items": self.list_accounts(), "relogined": 0}
@@ -209,11 +220,20 @@ class KeeperTests(unittest.TestCase):
             [("only@040601.xyz", ""), ("spaced@duck.com", ""), ("trail@040601.com", ""), ("with@x.com", "pw")],
         )
 
+    def test_parse_keeps_password_spaces(self):
+        text = "a@x.com----8KQ=8f_FKBePS8; \r\nb@y.com----pw\n"
+        self.assertEqual(
+            AccountKeeper.parse_credentials(text),
+            [("a@x.com", "8KQ=8f_FKBePS8; "), ("b@y.com", "pw")],
+        )
+
     def test_email_only_login_adds_account_without_password(self):
         service = PatrolService([], routed_domain="040601.xyz")
+        service.unregistered = {"new@040601.xyz"}
         result = service.login_and_add_account("new@040601.xyz")
         self.assertTrue(result["ok"])
-        self.assertEqual(service.logins, ["new@040601.xyz"])
+        self.assertEqual(service.signups, [("new@040601.xyz", "")])
+        self.assertEqual(service.logins, ["new@040601.xyz", "new@040601.xyz"])
         account = service.get_account(service.find_token_by_email("new@040601.xyz"))
         self.assertEqual(account.get("password") or "", "")
         self.assertEqual(account["refresh_token"], "rt-new")
@@ -267,11 +287,97 @@ class KeeperTests(unittest.TestCase):
 
     def test_login_and_add_new_account(self):
         service = PatrolService([])
+        service.unregistered = {"new@040601.com"}
+        result = service.login_and_add_account("new@040601.com", "pw ")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["registered"])
+        self.assertEqual(service.signups, [("new@040601.com", "pw ")])
+        account = service.get_account(service.find_token_by_email("new@040601.com"))
+        self.assertEqual(account["password"], "pw ")
+        self.assertEqual(account["refresh_token"], "rt-new")
+
+    def test_passwordless_signup_drops_the_typed_password(self):
+        service = PatrolService([], routed_domain="040601.com")
+        service.signup_result = {"ok": True, "created": True, "password_set": False}
+        service.unregistered = {"new@040601.com"}
+        passwords = []
+        original = service._login_with_password
+        service._login_with_password = lambda email, password, wait=0: passwords.append(password) or original(email, password, wait)
         result = service.login_and_add_account("new@040601.com", "pw")
         self.assertTrue(result["ok"])
+        self.assertEqual(passwords, ["pw", "", ""])
+        self.assertEqual(service.signups, [("new@040601.com", "pw")])
         account = service.get_account(service.find_token_by_email("new@040601.com"))
-        self.assertEqual(account["password"], "pw")
-        self.assertEqual(account["refresh_token"], "rt-new")
+        self.assertEqual(account.get("password") or "", "")
+
+    def test_password_not_set_falls_back_to_email_code(self):
+        service = PatrolService([], routed_domain="040601.com")
+        passwords = []
+
+        def login(email, password, wait=0):
+            passwords.append(password)
+            if password:
+                return {"ok": False, "error": "password_not_set"}
+            return {"ok": True, "email": email, "access_token": token("login-" + email), "refresh_token": "rt-new", "id_token": ""}
+
+        service._login_with_password = login
+        result = service.login_and_add_account("old@040601.com", "pw")
+        self.assertTrue(result["ok"])
+        self.assertEqual(passwords, ["pw", ""])
+        account = service.get_account(service.find_token_by_email("old@040601.com"))
+        self.assertEqual(account.get("password") or "", "")
+
+    def test_existing_passwordless_account_falls_back_to_email_code(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        service.signup_result = {"ok": True, "created": False, "password_set": False}
+        passwords = []
+
+        def login(email, password, wait=0):
+            passwords.append(password)
+            if password:
+                return {"ok": False, "error": "account_not_registered"}
+            return {"ok": True, "email": email, "access_token": token("login-" + email), "refresh_token": "rt-new", "id_token": ""}
+
+        service._login_with_password = login
+        result = service.login_and_add_account("old@040601.xyz", "pw")
+        self.assertTrue(result["ok"])
+        self.assertEqual(passwords, ["pw", ""])
+        self.assertEqual(service.signups, [])
+        account = service.get_account(service.find_token_by_email("old@040601.xyz"))
+        self.assertEqual(account.get("password") or "", "")
+
+    def test_rejected_password_step_falls_back_to_email_code(self):
+        service = PatrolService([], routed_domain="040601.com")
+        passwords = []
+
+        def login(email, password, wait=0):
+            passwords.append(password)
+            if password:
+                return {"ok": False, "error": "password_step_rejected"}
+            return {"ok": True, "email": email, "access_token": token("login-" + email), "refresh_token": "rt-new", "id_token": ""}
+
+        service._login_with_password = login
+        self.assertTrue(service.login_and_add_account("odd@040601.com", "pw")["ok"])
+        self.assertEqual(passwords, ["pw", ""])
+
+    def test_failed_signup_stops_before_second_login(self):
+        service = PatrolService([])
+        service.unregistered = {"new@040601.com"}
+        service.signup_result = {"ok": False, "error": "otp_not_received"}
+        result = service.login_and_add_account("new@040601.com", "pw")
+        self.assertEqual(result["error"], "otp_not_received")
+        self.assertEqual(service.logins, ["new@040601.com"])
+
+    def test_existing_email_is_not_registered(self):
+        service = PatrolService([])
+        result = service.login_and_add_account("old@040601.com", "pw")
+        self.assertTrue(result["ok"])
+        self.assertEqual(service.signups, [])
+
+    def test_existing_pool_account_is_not_registered_again(self):
+        service = PatrolService([{"access_token": token("old"), "email": "known@x.com", "password": "saved", "status": "异常"}])
+        service.login_and_add_account("known@x.com")
+        self.assertEqual(service.signups, [])
 
     def test_runs_are_trimmed(self):
         service = PatrolService([])
