@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import random
 from dataclasses import dataclass
-from secrets import choice
 from typing import Iterable
+
+from services.real_chat_prompt_bank import TEMPLATES, fill_template
 
 
 @dataclass(frozen=True)
@@ -69,13 +72,46 @@ REAL_CHAT_TEST_PROMPTS: tuple[RealChatTestPrompt, ...] = (
 REAL_CHAT_TEST_PROMPT_HISTORY_LIMIT = 8
 
 
-def choose_real_chat_test_prompt(recent_ids: Iterable[object] = ()) -> RealChatTestPrompt:
-    """Choose a prompt while avoiding the account's recently used prompt IDs."""
+# Share of each prompt source: handwritten list, generated Chinese, generated English.
+PROMPT_SOURCE_WEIGHTS: tuple[tuple[str, int], ...] = (("fixed", 20), ("zh", 50), ("en", 30))
 
-    recent = {
-        str(item).strip()
-        for item in recent_ids
-        if str(item or "").strip()
-    }
-    candidates = tuple(item for item in REAL_CHAT_TEST_PROMPTS if item.id not in recent)
-    return choice(candidates or REAL_CHAT_TEST_PROMPTS)
+_rng = random.SystemRandom()
+
+
+def _recent_set(recent_ids: Iterable[object]) -> set[str]:
+    return {str(item).strip() for item in recent_ids if str(item or "").strip()}
+
+
+def generate_real_chat_test_prompt(
+    lang: str,
+    recent_ids: Iterable[object] = (),
+    rng: random.Random | None = None,
+) -> RealChatTestPrompt:
+    """Build a prompt from the template bank, skipping templates used in recent prompts."""
+
+    rng = rng or _rng
+    recent = _recent_set(recent_ids)
+    recent_keys = {item.split(":")[1] for item in recent if item.startswith("gen:") and item.count(":") >= 2}
+    templates = TEMPLATES[lang]
+    candidates = tuple(item for item in templates if item.key not in recent_keys) or templates
+    template = rng.choice(candidates)
+    text = fill_template(template, rng)
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+    return RealChatTestPrompt(f"gen:{template.key}:{digest}", text)
+
+
+def choose_real_chat_test_prompt(
+    recent_ids: Iterable[object] = (),
+    rng: random.Random | None = None,
+) -> RealChatTestPrompt:
+    """Choose a prompt while avoiding the account's recently used prompts and templates."""
+
+    rng = rng or _rng
+    recent = _recent_set(recent_ids)
+    sources = [name for name, _ in PROMPT_SOURCE_WEIGHTS]
+    weights = [weight for _, weight in PROMPT_SOURCE_WEIGHTS]
+    source = rng.choices(sources, weights=weights, k=1)[0]
+    if source == "fixed":
+        candidates = tuple(item for item in REAL_CHAT_TEST_PROMPTS if item.id not in recent)
+        return rng.choice(candidates or REAL_CHAT_TEST_PROMPTS)
+    return generate_real_chat_test_prompt(source, recent, rng)

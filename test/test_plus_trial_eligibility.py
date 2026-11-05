@@ -132,7 +132,8 @@ class RealChatTestPromptTests(unittest.TestCase):
     def test_prompt_picker_falls_back_when_every_prompt_is_recent(self) -> None:
         all_ids = [item.id for item in REAL_CHAT_TEST_PROMPTS]
 
-        picked = choose_real_chat_test_prompt(all_ids)
+        with patch("random.SystemRandom.choices", return_value=["fixed"]):
+            picked = choose_real_chat_test_prompt(all_ids)
 
         self.assertIn(picked, REAL_CHAT_TEST_PROMPTS)
 

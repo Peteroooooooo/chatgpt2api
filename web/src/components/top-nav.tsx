@@ -21,6 +21,7 @@ const adminNavItems = [
   { href: "/image-manager", label: "图片管理" },
   { href: "/logs", label: "日志管理" },
   { href: "/patrol", label: "巡检" },
+  { href: "/daily-chat", label: "每日对话" },
   { href: "/debug", label: "调试" },
   { href: "/settings", label: "设置" },
 ];
