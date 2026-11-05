@@ -1,52 +1,31 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentProps } from "react";
 import {
-  Ban,
-  CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
-  CircleOff,
-  Copy,
+  Box,
   Download,
   Gift,
-  ExternalLink,
   KeyRound,
-  Link2,
   LoaderCircle,
   LogIn,
-  MessageCircle,
-  Pencil,
-  Play,
+  MoreHorizontal,
+  Plus,
   RefreshCw,
   Search,
   Trash2,
-  UserRound,
+  Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   checkPlusTrialEligibility,
   deleteAccounts,
@@ -56,12 +35,11 @@ import {
   fetchReLoginProgress,
   reLoginAccounts,
   refreshAccounts,
-  testRealChat,
   testChatUsability,
   testProxy,
+  testRealChat,
   updateAccount,
   type Account,
-  type AccountRefreshResponse,
   type AccountStatus,
   type Model,
   type RefreshProgressResponse,
@@ -69,1473 +47,755 @@ import {
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
+import { AccountDrawer } from "./components/account-drawer";
 import { AccountImportDialog } from "./components/account-import-dialog";
+import { AccountsTable, type RowActions, type RowBusy } from "./components/accounts-table";
 import { PasswordImportDialog } from "./components/password-import-dialog";
+import { accountType, copyText, downloadTokens, STATUS_ORDER } from "./lib/format";
 
-const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = [
-  { label: "全部状态", value: "all" },
-  { label: "正常", value: "正常" },
-  { label: "限流", value: "限流" },
-  { label: "异常", value: "异常" },
-  { label: "禁用", value: "禁用" },
-];
+type Progress = { current: number; total: number; message: string; detail: string } | null;
+type Confirm = { title: string; description: string; confirmLabel: string; run: () => Promise<void> } | null;
 
-const statusMeta: Record<
-  AccountStatus,
-  {
-    icon: typeof CheckCircle2;
-    badge: ComponentProps<typeof Badge>["variant"];
-  }
-> = {
-  正常: { icon: CheckCircle2, badge: "success" },
-  限流: { icon: CircleAlert, badge: "warning" },
-  异常: { icon: CircleOff, badge: "danger" },
-  禁用: { icon: Ban, badge: "secondary" },
-};
+const errorText = (error: unknown, fallback: string) => (error instanceof Error ? error.message : fallback);
 
-const metricCards = [
-  { key: "total", label: "账户总数", color: "text-stone-900", icon: UserRound },
-  { key: "active", label: "正常账户", color: "text-emerald-600", icon: CheckCircle2 },
-  { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
-  { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
-  { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
-  { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
-] as const;
-
-function formatCompact(value: number) {
-  if (value >= 1000) {
-    return `${(value / 1000).toFixed(1)}k`;
-  }
-  return String(value);
+function pollProgress(
+  fetcher: (id: string) => Promise<RefreshProgressResponse>,
+  progressId: string,
+  onTick: (p: RefreshProgressResponse) => void,
+  intervalMs = 400,
+) {
+  return new Promise<RefreshProgressResponse>((resolve, reject) => {
+    const timer = setInterval(async () => {
+      try {
+        const p = await fetcher(progressId);
+        if (!p.done) {
+          onTick(p);
+          return;
+        }
+        clearInterval(timer);
+        if (p.error) reject(new Error(p.error));
+        else resolve(p);
+      } catch (error) {
+        clearInterval(timer);
+        reject(error);
+      }
+    }, intervalMs);
+  });
 }
 
-function formatQuota(account: Account) {
-  return String(Math.max(0, account.quota));
+function withToken(set: Set<string>, tokens: string[], add: boolean) {
+  const next = new Set(set);
+  tokens.forEach((token) => (add ? next.add(token) : next.delete(token)));
+  return next;
 }
 
-function formatRestoreAt(value?: string | null) {
-  if (!value) {
-    return { absolute: "—", relative: "" };
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return { absolute: value, relative: "" };
-  }
-
-  const diffMs = Math.max(0, date.getTime() - Date.now());
-  const totalHours = Math.ceil(diffMs / (1000 * 60 * 60));
-  const days = Math.floor(totalHours / 24);
-  const hours = totalHours % 24;
-  const relative = diffMs > 0 ? `剩余 ${days}d ${hours}h` : "已到恢复时间";
-
-  const pad = (num: number) => String(num).padStart(2, "0");
-  const absolute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-
-  return { absolute, relative };
-}
-
-function formatQuotaSummary(accounts: Account[]) {
-  const availableAccounts = accounts.filter((account) => account.status === "正常");
-  return formatCompact(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
-}
-
-function maskToken(token?: string) {
-  if (!token) return "—";
-  if (token.length <= 18) return token;
-  return `${token.slice(0, 16)}...${token.slice(-8)}`;
-}
-
-function downloadTokens(accounts: Account[]) {
-  const content = `${accounts.map((account) => account.access_token).join("\n")}\n`;
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `accounts-${Date.now()}.txt`;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
-function displayAccountType(account: Account) {
-  return account.type || "Free";
-}
-
-function displayAccountSource(account: Account) {
-  const source = String(account.source_type || "").trim().toLowerCase();
-  if (!source) {
-    return "web";
-  }
-  if (source === "web") {
-    return "web";
-  }
-  return source;
+function pagerItems(page: number, pageCount: number) {
+  const items: (number | "…")[] = [];
+  const start = Math.max(1, page - 1);
+  const end = Math.min(pageCount, page + 1);
+  if (start > 1) items.push(1);
+  if (start > 2) items.push("…");
+  for (let p = start; p <= end; p += 1) items.push(p);
+  if (end < pageCount - 1) items.push("…");
+  if (end < pageCount) items.push(pageCount);
+  return items;
 }
 
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [availableModels, setAvailableModels] = useState<Model[]>([]);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [models, setModels] = useState<Model[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
+  const [statusFilter, setStatusFilter] = useState<AccountStatus | "">("");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState("10");
-  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
-  const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
-  const [editProxy, setEditProxy] = useState("");
-  const [isTestingProxy, setIsTestingProxy] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingModels, setIsLoadingModels] = useState(true);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [refreshingTokens, setRefreshingTokens] = useState<Set<string>>(new Set());
+  const [pageSize, setPageSize] = useState("20");
+
+  const [drawer, setDrawer] = useState<{ token: string; email: string; open: boolean } | null>(null);
+  const [busy, setBusy] = useState<RowBusy>({ refreshing: new Set(), chat: new Set(), realChat: new Set(), relogin: new Set() });
+  const [progress, setProgress] = useState<Progress>(null);
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [checkingPromo, setCheckingPromo] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
-  const [isRelogining, setIsRelogining] = useState(false);
-  const [checkingPromoTokens, setCheckingPromoTokens] = useState<Set<string>>(new Set());
-  const [testingChatTokens, setTestingChatTokens] = useState<Set<string>>(new Set());
-  const [testingRealChatTokens, setTestingRealChatTokens] = useState<Set<string>>(new Set());
-  const [progress, setProgress] = useState<{
-    visible: boolean;
-    current: number;
-    total: number;
-    message: string;
-    email: string;
-  }>({
-    visible: false,
-    current: 0,
-    total: 0,
-    message: "",
-    email: "",
-  });
-  const progressRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [refreshSummary, setRefreshSummary] = useState<Record<string, number | string> | null>(null);
+  const [isTestingProxy, setIsTestingProxy] = useState(false);
+  const [confirm, setConfirm] = useState<Confirm>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [passwordProgress, setPasswordProgress] = useState<{ done: number; total: number } | null>(null);
+  const [modelsOpen, setModelsOpen] = useState(false);
 
-  const loadAccounts = async (silent = false) => {
-    if (!silent) {
-      setIsLoading(true);
-    }
-    try {
-      const data = await fetchAccounts();
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "加载账户失败";
-      toast.error(message);
-    } finally {
-      if (!silent) {
-        setIsLoading(false);
-      }
-    }
+  const markBusy = (key: keyof RowBusy, tokens: string[], add: boolean) =>
+    setBusy((prev) => ({ ...prev, [key]: withToken(prev[key], tokens, add) }));
+
+  const applyItems = (items: Account[]) => {
+    setAccounts(items);
+    setSelected((prev) => new Set([...prev].filter((token) => items.some((item) => item.access_token === token))));
+    // A re-login replaces the access token; keep the drawer on the same account by email.
+    setDrawer((prev) => {
+      if (!prev || items.some((item) => item.access_token === prev.token)) return prev;
+      const same = prev.email ? items.find((item) => item.email === prev.email) : undefined;
+      return same ? { ...prev, token: same.access_token } : { ...prev, open: false };
+    });
   };
 
-  const loadModels = async () => {
-    setIsLoadingModels(true);
+  const loadAccounts = async (silent = false) => {
+    if (!silent) setIsLoading(true);
     try {
-      const data = await fetchModels();
-      setAvailableModels(Array.isArray(data.data) ? data.data : []);
+      applyItems((await fetchAccounts()).items);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "加载模型列表失败";
-      toast.error(message);
+      toast.error(errorText(error, "加载账号失败"));
     } finally {
-      setIsLoadingModels(false);
+      if (!silent) setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    if (didLoadRef.current) {
-      return;
-    }
+    if (didLoadRef.current) return;
     didLoadRef.current = true;
     void loadAccounts();
-    void loadModels();
-
-    // 清理进度条定时器
-    return () => {
-      if (progressRef.current) clearInterval(progressRef.current);
-    };
+    fetchModels()
+      .then((data) => setModels(Array.isArray(data.data) ? data.data : []))
+      .catch(() => setModels([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const filteredAccounts = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return accounts.filter((account) => {
-      const searchMatched =
-        normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
-      const typeMatched = typeFilter === "all" || displayAccountType(account) === typeFilter;
-      const statusMatched = statusFilter === "all" || account.status === statusFilter;
-      return searchMatched && typeMatched && statusMatched;
-    });
-  }, [accounts, query, statusFilter, typeFilter]);
-
-  const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
-  const safePage = Math.min(page, pageCount);
-  const startIndex = (safePage - 1) * Number(pageSize);
-  const currentRows = filteredAccounts.slice(startIndex, startIndex + Number(pageSize));
-  const allCurrentSelected =
-    currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.access_token));
-
-  const summary = useMemo(() => {
-    const total = accounts.length;
-    const active = accounts.filter((item) => item.status === "正常").length;
-    const limited = accounts.filter((item) => item.status === "限流").length;
-    const abnormal = accounts.filter((item) => item.status === "异常").length;
-    const disabled = accounts.filter((item) => item.status === "禁用").length;
-    const quota = formatQuotaSummary(accounts);
-
-    return { total, active, limited, abnormal, disabled, quota };
+  const byToken = useMemo(() => new Map(accounts.map((item) => [item.access_token, item])), [accounts]);
+  const counts = useMemo(() => {
+    const result: Record<string, number> = {};
+    accounts.forEach((item) => (result[item.status] = (result[item.status] ?? 0) + 1));
+    return result;
   }, [accounts]);
-
-  const accountTypeOptions = useMemo(
-    () => [
-      { label: "全部类型", value: "all" },
-      ...Array.from(new Set(accounts.map(displayAccountType))).map((type) => ({ label: type, value: type })),
-    ],
+  const quotaTotal = useMemo(
+    () => accounts.filter((item) => item.status === "正常").reduce((sum, item) => sum + Math.max(0, item.quota), 0),
     [accounts],
   );
+  const typeOptions = useMemo(() => Array.from(new Set(accounts.map(accountType))).sort(), [accounts]);
+  const abnormalTokens = useMemo(() => accounts.filter((item) => item.status === "异常").map((item) => item.access_token), [accounts]);
 
-  const selectedTokens = useMemo(() => {
-    const selectedSet = new Set(selectedIds);
-    return accounts.filter((item) => selectedSet.has(item.access_token)).map((item) => item.access_token);
-  }, [accounts, selectedIds]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return accounts.filter(
+      (item) =>
+        (!statusFilter || item.status === statusFilter) &&
+        (typeFilter === "all" || accountType(item) === typeFilter) &&
+        (!q || (item.email ?? "").toLowerCase().includes(q) || item.access_token.toLowerCase().includes(q)),
+    );
+  }, [accounts, query, statusFilter, typeFilter]);
 
-  const abnormalTokens = useMemo(() => {
-    return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
-  }, [accounts]);
+  const size = Number(pageSize);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / size));
+  const safePage = Math.min(page, pageCount);
+  const start = (safePage - 1) * size;
+  const rows = filtered.slice(start, start + size);
+  const selectedTokens = [...selected];
 
-  const paginationItems = useMemo(() => {
-    const items: (number | "...")[] = [];
-    const start = Math.max(1, safePage - 1);
-    const end = Math.min(pageCount, safePage + 1);
+  // ── actions ──
 
-    if (start > 1) items.push(1);
-    if (start > 2) items.push("...");
-    for (let current = start; current <= end; current += 1) items.push(current);
-    if (end < pageCount - 1) items.push("...");
-    if (end < pageCount) items.push(pageCount);
-
-    return items;
-  }, [pageCount, safePage]);
-
-  const handleDeleteTokens = async (tokens: string[]) => {
-    if (tokens.length === 0) {
-      toast.error("请先选择要删除的账户");
-      return;
+  const refresh = async (tokens: string[]) => {
+    if (tokens.length === 0) return;
+    const single = tokens.length === 1;
+    if (single) markBusy("refreshing", tokens, true);
+    else {
+      setBulkRunning(true);
+      setProgress({ current: 0, total: tokens.length, message: "正在刷新账号信息和额度", detail: "" });
     }
-
-    setIsDeleting(true);
     try {
-      const data = await deleteAccounts(tokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-      toast.success(`删除 ${data.removed ?? 0} 个账户`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "删除账户失败";
-      toast.error(message);
-    } finally {
-      setIsDeleting(false);
-    }
-  };
-
-  const handleRefreshAccounts = async (accessTokens: string[]) => {
-    if (accessTokens.length === 0) {
-      toast.error("没有需要刷新的账户");
-      return;
-    }
-
-    if (accessTokens.length === 1) {
-      setRefreshingTokens((prev) => new Set([...prev, accessTokens[0]]));
-      try {
-        const { progress_id } = await refreshAccounts(accessTokens);
-        // 单账号：轮询等待完成
-        await pollRefreshProgress(progress_id, (progress) => {
-          if (progress.done && progress.result) {
-            setAccounts(progress.result.items);
-            setSelectedIds((prev) => prev.filter((id) => progress.result!.items.some((item) => item.access_token === id)));
-          }
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "刷新账户失败";
-        toast.error(message);
-      } finally {
-        setRefreshingTokens((prev) => {
-          const next = new Set(prev);
-          next.delete(accessTokens[0]);
-          return next;
-        });
-      }
-      return;
-    }
-
-    setIsRefreshing(true);
-
-    // 计算非选中账号的基数（统计卡片联动用）
-    const selectedTokenSet = new Set(accessTokens);
-    const baseAccountsList = accounts.filter((a) => !selectedTokenSet.has(a.access_token));
-    const baseActive = baseAccountsList.filter((a) => a.status === "正常").length;
-    const baseLimited = baseAccountsList.filter((a) => a.status === "限流").length;
-    const baseAbnormal = baseAccountsList.filter((a) => a.status === "异常").length;
-    const baseDisabled = baseAccountsList.filter((a) => a.status === "禁用").length;
-    const baseNormalAccounts = baseAccountsList.filter((a) => a.status === "正常");
-    const baseQuotaNum = baseNormalAccounts.reduce((s, a) => s + Math.max(0, a.quota), 0);
-
-    // 显示进度条（只显示当前任务，不含分类统计）
-    const total = accessTokens.length;
-    setProgress({
-      visible: true,
-      current: 0,
-      total,
-      message: "正在刷新账号信息...",
-      email: "",
-    });
-
-    try {
-      const { progress_id } = await refreshAccounts(accessTokens);
-
-      // 轮询进度到完成
-      const data = await new Promise<AccountRefreshResponse>((resolve, reject) => {
-        const pollTimer = setInterval(async () => {
-          try {
-            const p = await fetchRefreshProgress(progress_id);
-            if (p.done) {
-              clearInterval(pollTimer);
-              if (p.error) {
-                reject(new Error(p.error));
-                return;
-              }
-              if (!p.result) {
-                reject(new Error("刷新结果为空"));
-                return;
-              }
-              // 更新最终进度显示
-              setProgress((prev) => ({
-                ...prev,
-                current: prev.total,
-                message: "刷新完成",
-              }));
-              // 清除联动统计
-              setRefreshSummary(null);
-              resolve(p.result);
-            } else {
-              // 实时更新进度
-              setProgress((prev) => ({
-                ...prev,
-                current: p.processed,
-              }));
-              // 实时更新统计卡片：基数 + 已刷新的累加结果
-              const runningActive = baseActive + ((p.status_counts?.["正常"]) ?? 0);
-              const runningLimited = baseLimited + ((p.status_counts?.["限流"]) ?? 0);
-              const runningAbnormal = baseAbnormal + ((p.status_counts?.["异常"]) ?? 0);
-              const runningDisabled = baseDisabled + ((p.status_counts?.["禁用"]) ?? 0);
-              setRefreshSummary({
-                total: accounts.length,
-                active: runningActive,
-                limited: runningLimited,
-                abnormal: runningAbnormal,
-                disabled: runningDisabled,
-                quota: formatCompact(baseQuotaNum + (p.total_quota ?? 0)),
-              });
-            }
-          } catch (err) {
-            clearInterval(pollTimer);
-            reject(err);
-          }
-        }, 300);
-      });
-
-      // 刷新完成，更新数据
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-
-      const relogined = data.relogined ?? 0;
-
-      // 显示重新登录进度
-      if (relogined > 0) {
-        setProgress({
-          visible: true,
-          current: 0,
-          total: relogined,
-          message: `正在尝试对 ${relogined} 个账号进行移除异常状态`,
-          email: "",
-        });
-        // 模拟重新登录进度
-        let reCount = 0;
-        await new Promise<void>((resolve) => {
-          const timer = setInterval(() => {
-            reCount += 1;
-            if (reCount >= relogined) {
-              clearInterval(timer);
-              setProgress({
-                visible: true,
-                current: relogined,
-                total: relogined,
-                message: "移除异常状态完成",
-                email: "",
-              });
-              setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
-              resolve();
-            } else {
-              setProgress((prev) => ({ ...prev, current: reCount }));
-            }
-          }, 150);
-          setTimeout(resolve, 2000);
-        });
-      } else {
-        setProgress({
-          visible: true,
-          current: total,
-          total,
-          message: "刷新完成",
-          email: "",
-        });
-        setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
-      }
-
-      if ((data.errors ?? []).length > 0) {
-        const firstError = data.errors?.[0]?.error;
+      const { progress_id } = await refreshAccounts(tokens);
+      const done = await pollProgress(fetchRefreshProgress, progress_id, (p) =>
+        single ? null : setProgress((prev) => prev && { ...prev, current: p.processed }),
+      );
+      const data = done.result;
+      if (!data) throw new Error("刷新结果为空");
+      applyItems(data.items);
+      const errors = data.errors ?? [];
+      if (errors.length > 0) {
         toast.error(
-          `刷新成功 ${data.refreshed} 个，失败 ${(data.errors ?? []).length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          single ? `刷新失败：${errors[0].error}` : `刷新成功 ${data.refreshed} 个，失败 ${errors.length} 个；首个错误：${errors[0].error}`,
         );
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户${relogined > 0 ? `，已触发 ${relogined} 个账号重新登录` : ""}`);
+        const relogined = data.relogined ?? 0;
+        toast.success(single ? "已刷新" : `已刷新 ${data.refreshed} 个账号${relogined ? `，${relogined} 个开始重新登录` : ""}`);
       }
     } catch (error) {
-      setProgress({ visible: false, current: 0, total: 0, message: "", email: "" });
-      setRefreshSummary(null);
-      const message = error instanceof Error ? error.message : "刷新账户失败";
-      toast.error(message);
+      toast.error(errorText(error, "刷新账号失败"));
     } finally {
-      setIsRefreshing(false);
+      if (single) markBusy("refreshing", tokens, false);
+      else {
+        setBulkRunning(false);
+        setProgress(null);
+      }
     }
   };
 
-  const pollRefreshProgress = async (
-    progressId: string,
-    onUpdate: (p: RefreshProgressResponse) => void,
-  ): Promise<void> => {
-    return new Promise<void>((resolve, reject) => {
-      const timer = setInterval(async () => {
-        try {
-          const p = await fetchRefreshProgress(progressId);
-          if (p.done) {
-            clearInterval(timer);
-            if (p.error) {
-              reject(new Error(p.error));
-            } else {
-              onUpdate(p);
-              resolve();
-            }
-          }
-        } catch (err) {
-          clearInterval(timer);
-          reject(err);
-        }
-      }, 500);
-    });
-  };
-
-  const handleReLogin = async (accessTokens: string[]) => {
-    if (accessTokens.length === 0) {
-      toast.error("请先选择要恢复的账户");
+  const relogin = async (tokens: string[], onlyAbnormal: boolean) => {
+    const targets = onlyAbnormal ? tokens.filter((token) => byToken.get(token)?.status === "异常") : tokens;
+    if (targets.length === 0) {
+      toast.error("选中的账号里没有异常账号");
       return;
     }
-
-    // 只处理异常账号，过滤非异常账号
-    const abnormalTokens = accessTokens.filter((token) => {
-      const account = accounts.find((a) => a.access_token === token);
-      return account?.status === "异常";
-    });
-
-    if (abnormalTokens.length === 0) {
-      toast.error("选中账号中没有异常账号");
-      return;
+    if (targets.length < tokens.length) toast.info(`已跳过 ${tokens.length - targets.length} 个不是异常状态的账号`);
+    const single = targets.length === 1;
+    markBusy("relogin", targets, true);
+    if (!single) {
+      setBulkRunning(true);
+      setProgress({ current: 0, total: targets.length, message: "正在重新登录", detail: "" });
+    } else {
+      toast.info("已开始重新登录，可能需要等邮箱验证码，最长约 2 分钟");
     }
-
-    if (abnormalTokens.length < accessTokens.length) {
-      toast.info(`已过滤 ${accessTokens.length - abnormalTokens.length} 个非异常账号`);
-    }
-
-    setIsRelogining(true);
-
-    // 计算非选中账号的基数（统计卡片联动用）
-    const selectedTokenSet = new Set(abnormalTokens);
-    const baseAccountsList = accounts.filter((a) => !selectedTokenSet.has(a.access_token));
-    const baseActive = baseAccountsList.filter((a) => a.status === "正常").length;
-    const baseLimited = baseAccountsList.filter((a) => a.status === "限流").length;
-    const baseAbnormal = baseAccountsList.filter((a) => a.status === "异常").length;
-    const baseDisabled = baseAccountsList.filter((a) => a.status === "禁用").length;
-
-    // 显示进度条（真实进度）
-    const total = abnormalTokens.length;
-    setProgress({ visible: true, current: 0, total, message: "正在尝试恢复异常账号...", email: "" });
-
     try {
-      const { progress_id } = await reLoginAccounts(abnormalTokens);
-
-      // 轮询进度到完成
-      await new Promise<void>((resolve, reject) => {
-        const pollTimer = setInterval(async () => {
-          try {
-            const p = await fetchReLoginProgress(progress_id);
-            if (p.done) {
-              clearInterval(pollTimer);
-              if (p.error) {
-                reject(new Error(p.error));
-                return;
-              }
-              setProgress((prev) => ({ ...prev, current: prev.total, message: "恢复流程已完成" }));
-              setRefreshSummary(null);
-              resolve();
-            } else {
-              // 实时更新进度
-              const results = p.results ?? [];
-              // 找到最新一条有错误的结果
-              const lastErrorResult = [...results].reverse().find((r) => r.error);
-              const emailHint = lastErrorResult
-                ? `失败: ${lastErrorResult.token} ${lastErrorResult.error ?? ""}`
-                : `已处理 ${p.processed}/${p.total}`;
-              setProgress((prev) => ({
-                ...prev,
-                current: p.processed,
-                email: emailHint,
-                message: "正在尝试恢复异常账号...",
-              }));
-
-              // 实时更新统计卡片：基数 + 已处理的恢复结果
-              let runningActive = baseActive;
-              let runningAbnormal = baseAbnormal;
-              let runningDisabled = baseDisabled;
-              for (const r of results) {
-                if (r.status === "成功") {
-                  runningActive += 1;
-                  runningAbnormal -= 1;
-                } else if (r.status === "禁用") {
-                  runningDisabled += 1;
-                  runningAbnormal -= 1;
-                }
-                // "异常"或"跳过"：保持异常状态不变
-              }
-              setRefreshSummary({
-                total: accounts.length,
-                active: runningActive,
-                limited: baseLimited,
-                abnormal: runningAbnormal,
-                disabled: runningDisabled,
-                quota: summary.quota,
-              });
-            }
-          } catch (err) {
-            clearInterval(pollTimer);
-            reject(err);
-          }
-        }, 300);
-      });
-
-      // 等待后台线程完成，再拉取最新数据
-      await new Promise<void>((resolve) => setTimeout(resolve, 500));
-      try {
-        const freshData = await fetchAccounts();
-        setAccounts(freshData.items);
-        setSelectedIds((prev) => prev.filter((id) => freshData.items.some((item) => item.access_token === id)));
-      } catch { /* 静默失败 */ }
-
-      setProgress({
-        visible: true,
-        current: total,
-        total,
-        message: "恢复完成",
-        email: "",
-      });
-      setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
-
-      toast.success(`恢复流程已全部完成`);
+      const { progress_id } = await reLoginAccounts(targets);
+      const done = await pollProgress(
+        fetchReLoginProgress,
+        progress_id,
+        (p) => {
+          if (single) return;
+          const failed = [...(p.results ?? [])].reverse().find((r) => r.error);
+          setProgress((prev) => prev && { ...prev, current: p.processed, detail: failed ? `最近失败：${failed.error}` : "" });
+        },
+        1000,
+      );
+      await loadAccounts(true);
+      const results = done.results ?? [];
+      const ok = results.filter((r) => r.status === "成功").length;
+      if (single) {
+        const result = results[0];
+        if (result?.status === "成功") toast.success("重新登录成功");
+        else toast.error(`重新登录没有成功：${result?.error || result?.status || "未知原因"}`);
+      } else {
+        toast[ok === targets.length ? "success" : "warning"](`重新登录完成：成功 ${ok} 个，未成功 ${targets.length - ok} 个`);
+      }
     } catch (error) {
-      setProgress({ visible: false, current: 0, total: 0, message: "", email: "" });
-      setRefreshSummary(null);
-      const message = error instanceof Error ? error.message : "重新登录失败";
-      toast.error(message);
+      toast.error(errorText(error, "重新登录失败"));
     } finally {
-      setIsRelogining(false);
+      markBusy("relogin", targets, false);
+      if (!single) {
+        setBulkRunning(false);
+        setProgress(null);
+      }
     }
   };
 
-  const openEditDialog = (account: Account) => {
-    setEditingAccount(account);
-    setEditStatus(account.status);
-    setEditProxy(account.proxy ?? "");
-  };
-
-  const handleTestAccountProxy = async () => {
-    const candidate = editProxy.trim();
-    if (!candidate) {
-      toast.error("请先填写代理地址");
-      return;
-    }
-    setIsTestingProxy(true);
+  const runTest = async (tokens: string[], kind: "chat" | "realChat") => {
+    if (tokens.length === 0) return;
+    const name = kind === "chat" ? "快速测试" : "真实对话测试";
+    markBusy(kind, tokens, true);
     try {
-      const data = await testProxy(candidate);
-      data.result.ok
-        ? toast.success(`代理可用（${data.result.latency_ms} ms，HTTP ${data.result.status}）`)
-        : toast.error(`代理不可用：${data.result.error ?? "未知错误"}`);
+      const data = kind === "chat" ? await testChatUsability(tokens) : await testRealChat(tokens);
+      applyItems(data.items);
+      const usable = data.results.filter((item) => item.status === "可用").length;
+      const unusable = data.results.filter((item) => item.status === "不可用").length;
+      const failed = data.results.filter((item) => item.status === "测试失败");
+      if (tokens.length === 1) {
+        const result = data.results[0];
+        if (result?.status === "可用") toast.success(`${name}：可用`);
+        else toast.warning(`${name}：${result?.status ?? "未知"}${result?.error ? `，${result.error}` : ""}`);
+      } else {
+        toast[failed.length || unusable ? "warning" : "success"](
+          `${name}完成：可用 ${usable}，不可用 ${unusable}，测试失败 ${failed.length}`,
+        );
+      }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "测试代理失败");
+      toast.error(errorText(error, `${name}失败`));
     } finally {
-      setIsTestingProxy(false);
+      markBusy(kind, tokens, false);
     }
   };
 
-  const handleCheckPlusTrialEligibility = async (accessTokens: string[]) => {
-    const tokens = Array.from(new Set(accessTokens.filter(Boolean)));
-    if (tokens.length === 0) {
-      return;
-    }
-
-    setCheckingPromoTokens((prev) => new Set([...prev, ...tokens]));
+  const checkPromo = async (tokens: string[]) => {
+    if (tokens.length === 0) return;
+    setCheckingPromo(true);
     try {
       const data = await checkPlusTrialEligibility(tokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-
+      applyItems(data.items);
       const eligible = data.results.filter((item) => item.eligible === true).length;
       const ineligible = data.results.filter((item) => item.eligible === false).length;
       const failed = data.results.filter((item) => item.eligible === null).length;
-      if (failed > 0) {
-        const firstError = data.results.find((item) => item.eligible === null)?.error;
-        if (tokens.length === 1) {
-          toast.warning(`试用资格检测失败：${firstError || "上游未返回明确结果"}（已保留原标识）`);
-        } else {
-          toast.warning(`试用资格检测完成：有资格 ${eligible}，无资格 ${ineligible}，检测失败 ${failed}（失败项保留原标识）`);
+      toast[failed ? "warning" : "success"](
+        `试用资格检测完成：有资格 ${eligible}，无资格 ${ineligible}${failed ? `，检测失败 ${failed}（保留原标识）` : ""}`,
+      );
+    } catch (error) {
+      toast.error(errorText(error, "试用资格检测失败"));
+    } finally {
+      setCheckingPromo(false);
+    }
+  };
+
+  const askDelete = (tokens: string[], label: string) => {
+    if (tokens.length === 0) return;
+    setConfirm({
+      title: `删除${label}？`,
+      description: `将从号池移除 ${tokens.length} 个账号，删除后无法恢复。账号本身在 ChatGPT 那边不受影响，之后可以重新导入。`,
+      confirmLabel: "删除",
+      run: async () => {
+        setIsDeleting(true);
+        try {
+          const data = await deleteAccounts(tokens);
+          applyItems(data.items);
+          toast.success(`已删除 ${data.removed ?? tokens.length} 个账号`);
+        } catch (error) {
+          toast.error(errorText(error, "删除账号失败"));
+        } finally {
+          setIsDeleting(false);
         }
-      } else {
-        toast.success(`试用资格检测完成：有资格 ${eligible}，无资格 ${ineligible}`);
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "试用资格检测失败");
-    } finally {
-      setCheckingPromoTokens((prev) => {
-        const next = new Set(prev);
-        tokens.forEach((token) => next.delete(token));
-        return next;
-      });
-    }
+      },
+    });
   };
 
-  const handleTestChatUsability = async (accessTokens: string[]) => {
-    const tokens = Array.from(new Set(accessTokens.filter(Boolean)));
-    if (tokens.length === 0) {
-      return;
-    }
-
-    setTestingChatTokens((prev) => new Set([...prev, ...tokens]));
-    try {
-      const data = await testChatUsability(tokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-
-      const usable = data.results.filter((item) => item.status === "可用").length;
-      const unusable = data.results.filter((item) => item.status === "不可用").length;
-      const failed = data.results.filter((item) => item.status === "测试失败").length;
-      if (failed > 0) {
-        const firstError = data.results.find((item) => item.status === "测试失败")?.error;
-        toast.warning(
-          tokens.length === 1
-            ? `实时对话测试失败：${firstError || "上游暂时无法判断"}`
-            : `实时对话测试完成：可用 ${usable}，不可用 ${unusable}，测试失败 ${failed}`,
-        );
-      } else {
-        toast.success(`实时对话测试完成：可用 ${usable}，不可用 ${unusable}`);
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "实时对话测试失败");
-    } finally {
-      setTestingChatTokens((prev) => {
-        const next = new Set(prev);
-        tokens.forEach((token) => next.delete(token));
-        return next;
-      });
-    }
-  };
-
-  const handleTestRealChat = async (accessTokens: string[]) => {
-    const tokens = Array.from(new Set(accessTokens.filter(Boolean)));
-    if (tokens.length === 0) {
-      return;
-    }
-
-    setTestingRealChatTokens((prev) => new Set([...prev, ...tokens]));
-    try {
-      const data = await testRealChat(tokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-
-      const usable = data.results.filter((item) => item.status === "可用").length;
-      const unusable = data.results.filter((item) => item.status === "不可用").length;
-      const failed = data.results.filter((item) => item.status === "测试失败").length;
-      if (failed > 0) {
-        const firstError = data.results.find((item) => item.status === "测试失败")?.error;
-        toast.warning(
-          tokens.length === 1
-            ? `真实对话测试失败：${firstError || "上游暂时无法判断"}`
-            : `真实对话测试完成：可用 ${usable}，不可用 ${unusable}，测试失败 ${failed}`,
-        );
-      } else {
-        toast.success(`真实对话测试完成：可用 ${usable}，不可用 ${unusable}`);
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "真实对话测试失败");
-    } finally {
-      setTestingRealChatTokens((prev) => {
-        const next = new Set(prev);
-        tokens.forEach((token) => next.delete(token));
-        return next;
-      });
-    }
-  };
-
-  const handleUpdateAccount = async () => {
-    if (!editingAccount) {
-      return;
-    }
-
+  const saveAccount = async (token: string, patch: { status: AccountStatus; proxy: string }) => {
     setIsUpdating(true);
     try {
-      const data = await updateAccount(editingAccount.access_token, {
-        status: editStatus,
-        proxy: editProxy.trim(),
-      });
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-      setEditingAccount(null);
-      toast.success("账号信息已更新");
+      applyItems((await updateAccount(token, patch)).items);
+      toast.success("已保存");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "更新账号失败";
-      toast.error(message);
+      toast.error(errorText(error, "保存失败"));
     } finally {
       setIsUpdating(false);
     }
   };
 
-  const toggleSelectAll = (checked: boolean) => {
-    if (checked) {
-      setSelectedIds((prev) => Array.from(new Set([...prev, ...currentRows.map((item) => item.access_token)])));
-      return;
+  const checkProxy = async (proxy: string) => {
+    setIsTestingProxy(true);
+    try {
+      const { result } = await testProxy(proxy);
+      if (result.ok) toast.success(`代理可用（${result.latency_ms} ms，HTTP ${result.status}）`);
+      else toast.error(`代理不可用：${result.error ?? "未知错误"}`);
+    } catch (error) {
+      toast.error(errorText(error, "测试代理失败"));
+    } finally {
+      setIsTestingProxy(false);
     }
-    setSelectedIds((prev) => prev.filter((id) => !currentRows.some((row) => row.access_token === id)));
   };
+
+  const copyToken = (token: string) => {
+    void copyText(token).then(
+      () => toast.success("Token 已复制"),
+      () => toast.error("复制失败，浏览器没有给剪贴板权限"),
+    );
+  };
+
+  const actions: RowActions = {
+    open: (account) => setDrawer({ token: account.access_token, email: account.email ?? "", open: true }),
+    quickTest: (token) => void runTest([token], "chat"),
+    realTest: (token) => void runTest([token], "realChat"),
+    refresh: (token) => void refresh([token]),
+    relogin: (token) => void relogin([token], false),
+    copyToken,
+    remove: (account) => askDelete([account.access_token], ` ${account.email || "这个账号"}`),
+  };
+
+  const toggle = (token: string, checked: boolean) => setSelected((prev) => withToken(prev, [token], checked));
+  const toggleAll = (checked: boolean) =>
+    setSelected((prev) =>
+      withToken(
+        prev,
+        rows.map((row) => row.access_token),
+        checked,
+      ),
+    );
+  const setFilter = (fn: () => void) => {
+    fn();
+    setPage(1);
+  };
+
+  const drawerAccount = drawer ? (byToken.get(drawer.token) ?? null) : null;
+  const busyAll = isLoading || bulkRunning || isDeleting;
+  const tabs: { value: AccountStatus | ""; label: string; count: number }[] = [
+    { value: "", label: "全部", count: accounts.length },
+    ...STATUS_ORDER.map((status) => ({ value: status, label: status, count: counts[status] ?? 0 })),
+  ];
 
   return (
     <>
-      <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-            Account Pool
-          </div>
+      <section className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
           <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
+          <p className="mt-1 text-sm text-stone-500">
+            <b className="font-semibold text-stone-800">{accounts.length}</b> 个账号 · 可用图片额度{" "}
+            <b className="font-semibold text-stone-800">{quotaTotal}</b>
+            {passwordProgress ? ` · 邮箱密码导入中 ${passwordProgress.done}/${passwordProgress.total}` : ""}
+          </p>
         </div>
-
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void loadAccounts()}
-            disabled={isLoading || isRefreshing || isDeleting}
-          >
-            <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
-            刷新
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
-            disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
-          >
-            <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-            一键刷新所有账号信息和额度
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-amber-200 bg-amber-50/80 px-4 text-amber-700 hover:bg-amber-100"
-            onClick={() => void handleCheckPlusTrialEligibility(accounts.map((item) => item.access_token))}
-            disabled={accounts.length === 0 || checkingPromoTokens.size > 0}
-            title="只检测 Plus 试用资格，不会测试账号能否正常聊天"
-          >
-            <Gift className={cn("size-4", checkingPromoTokens.size > 0 ? "animate-pulse" : "")} />
-            检测全部试用资格
-          </Button>
-          <AccountImportDialog
-            disabled={isLoading || isRefreshing || isDeleting}
-            onImported={(items) => {
-              setAccounts(items);
-              setSelectedIds([]);
-              setPage(1);
-            }}
-          />
-          <PasswordImportDialog
-            disabled={isLoading || isRefreshing || isDeleting}
-            onFinished={() => void loadAccounts(true)}
-          />
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => downloadTokens(accounts)}
-            disabled={accounts.length === 0}
-          >
-            <Download className="size-4" />
-            导出全部 Token
-          </Button>
+          <div className="inline-flex">
+            <Button
+              variant="outline"
+              className="h-9 rounded-l-lg rounded-r-none border-stone-200 bg-white px-3"
+              onClick={() => void loadAccounts()}
+              disabled={busyAll}
+              title="重新拉取列表"
+            >
+              <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
+              刷新
+            </Button>
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="h-9 w-8 rounded-l-none rounded-r-lg border-l-0 border-stone-200 bg-white px-0"
+                  title="更多刷新"
+                >
+                  <ChevronDown className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent>
+                <DropdownMenuItem
+                  disabled={busyAll || accounts.length === 0}
+                  onSelect={() => void refresh(accounts.map((item) => item.access_token))}
+                >
+                  <RefreshCw />
+                  刷新全部账号信息和额度
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={checkingPromo || accounts.length === 0}
+                  onSelect={() => void checkPromo(accounts.map((item) => item.access_token))}
+                >
+                  <Gift />
+                  {checkingPromo ? "正在检测试用资格…" : "检测全部试用资格"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button className="h-9 rounded-lg bg-stone-950 px-3 text-white hover:bg-stone-800" disabled={busyAll}>
+                {passwordProgress ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                添加账号
+                <ChevronDown className="size-4 opacity-70" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              <DropdownMenuItem onSelect={() => setImportOpen(true)}>
+                <Upload />
+                导入 Token / Session 等
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setPasswordOpen(true)}>
+                <KeyRound />
+                邮箱密码导入
+                {passwordProgress ? (
+                  <span className="ml-auto text-xs text-stone-400">
+                    {passwordProgress.done}/{passwordProgress.total}
+                  </span>
+                ) : null}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" title="更多">
+                <MoreHorizontal className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              <DropdownMenuItem disabled={accounts.length === 0} onSelect={() => downloadTokens(accounts)}>
+                <Download />
+                导出全部 Token
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setModelsOpen(true)}>
+                <Box />
+                查看可用模型
+                <span className="ml-auto text-xs text-stone-400">{models.length}</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </section>
 
-      {/* 进度条 */}
-      {progress.visible && (
-        <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white/90 shadow-sm">
-          <div className="px-4 py-3">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-stone-600">
-                {progress.message}
-                {progress.email && <span className="ml-1 font-medium text-stone-700">{progress.email}</span>}
-              </span>
-              <span className="font-medium text-stone-700">
-                {progress.current}/{progress.total}
-              </span>
-            </div>
-            <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-stone-100">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-amber-400 to-orange-500 transition-all duration-300 ease-out"
-                style={{ width: `${progress.total > 0 ? (progress.current / progress.total) * 100 : 0}%` }}
-              />
-            </div>
+      {progress ? (
+        <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-stone-600">
+              {progress.message}
+              {progress.detail ? <span className="ml-2 text-xs text-rose-600 dark:text-rose-400">{progress.detail}</span> : null}
+            </span>
+            <span className="font-medium tabular-nums text-stone-700">
+              {progress.current}/{progress.total}
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-100">
+            <div
+              className="h-full rounded-full bg-stone-800 transition-all duration-300 dark:bg-stone-200"
+              style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }}
+            />
           </div>
         </div>
-      )}
+      ) : null}
 
-      <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
-        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
-          <DialogHeader className="gap-2">
-            <DialogTitle>编辑账户</DialogTitle>
-            <DialogDescription className="text-sm leading-6">
-              手动修改账号状态和专属代理。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">状态</label>
-              <Select value={editStatus} onValueChange={(value) => setEditStatus(value as AccountStatus)}>
-                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {accountStatusOptions
-                    .filter((option) => option.value !== "all")
-                    .map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">账号代理</label>
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <Input
-                  value={editProxy}
-                  onChange={(event) => setEditProxy(event.target.value)}
-                  placeholder="留空走全局代理，例如 http://127.0.0.1:7890"
-                  className="h-11 rounded-xl border-stone-200 bg-white"
-                />
-                <Button
-                  variant="outline"
-                  className="h-11 rounded-xl border-stone-200 bg-white px-4 text-stone-700 sm:w-24"
-                  onClick={() => void handleTestAccountProxy()}
-                  disabled={isTestingProxy}
-                >
-                  {isTestingProxy ? <LoaderCircle className="size-4 animate-spin" /> : <Link2 className="size-4" />}
-                  测试
-                </Button>
-              </div>
-            </div>
-          </div>
-          <DialogFooter className="pt-2">
+      <section className="overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm">
+        {selected.size > 0 ? (
+          <div className="flex min-h-[60px] flex-wrap items-center gap-2 border-b border-stone-200 bg-stone-50 px-4 py-3">
+            <span className="mr-2 text-sm font-semibold text-stone-800">已选 {selected.size} 个账号</span>
             <Button
-              variant="secondary"
-              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
-              onClick={() => setEditingAccount(null)}
-              disabled={isUpdating}
+              variant="outline"
+              size="sm"
+              className="h-8 rounded-lg border-stone-200 bg-white"
+              disabled={bulkRunning}
+              onClick={() => void refresh(selectedTokens)}
             >
+              <RefreshCw className="size-4" />
+              刷新信息
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 rounded-lg border-stone-200 bg-white"
+              disabled={busy.chat.size > 0}
+              onClick={() => void runTest(selectedTokens, "chat")}
+            >
+              快速测试
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 rounded-lg border-stone-200 bg-white"
+              disabled={bulkRunning}
+              onClick={() => void relogin(selectedTokens, true)}
+              title="只对异常账号重新登录"
+            >
+              <LogIn className="size-4" />
+              尝试恢复
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 rounded-lg border-stone-200 bg-white text-rose-600 hover:text-rose-700 dark:text-rose-400"
+              disabled={isDeleting}
+              onClick={() => askDelete(selectedTokens, "选中的账号")}
+            >
+              <Trash2 className="size-4" />
+              删除
+            </Button>
+            <div className="flex-1" />
+            <Button variant="ghost" size="sm" className="h-8 rounded-lg" onClick={() => setSelected(new Set())}>
+              取消选择
+            </Button>
+          </div>
+        ) : (
+          <div className="flex min-h-[60px] flex-wrap items-center gap-3 border-b border-stone-200 px-4 py-3">
+            <div className="flex max-w-full gap-0.5 overflow-x-auto rounded-lg border border-stone-100 bg-stone-50 p-[3px]">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.value || "all"}
+                  type="button"
+                  onClick={() => setFilter(() => setStatusFilter(tab.value))}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm whitespace-nowrap text-stone-500 transition hover:text-stone-800",
+                    statusFilter === tab.value && "bg-white font-medium text-stone-900 shadow-sm",
+                  )}
+                >
+                  {tab.label}
+                  <span
+                    className={cn(
+                      "text-xs tabular-nums text-stone-400",
+                      tab.value === "异常" && tab.count > 0 && "font-semibold text-rose-600 dark:text-rose-400",
+                    )}
+                  >
+                    {tab.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="hidden flex-1 md:block" />
+            <div className="relative w-full md:w-64">
+              <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-stone-400" />
+              <Input
+                value={query}
+                onChange={(event) => setFilter(() => setQuery(event.target.value))}
+                placeholder="搜索邮箱或 Token"
+                className="h-9 rounded-lg border-stone-200 bg-white pl-8"
+              />
+            </div>
+            <Select value={typeFilter} onValueChange={(value) => setFilter(() => setTypeFilter(value))}>
+              <SelectTrigger className="h-9 w-[120px] rounded-lg border-stone-200 bg-white">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部类型</SelectItem>
+                {typeOptions.map((type) => (
+                  <SelectItem key={type} value={type}>
+                    {type.toUpperCase()}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+
+        {abnormalTokens.length > 0 && selected.size === 0 ? (
+          <div className="flex flex-wrap items-center gap-2.5 border-b border-stone-200 bg-rose-50 px-4 py-2.5 text-sm dark:bg-rose-500/10">
+            <CircleAlert className="size-4 text-rose-600 dark:text-rose-400" />
+            <span className="flex-1 text-stone-700">{abnormalTokens.length} 个账号异常，自动重登没有成功。点开账号可以看到原因。</span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 rounded-lg border-stone-200 bg-white"
+              disabled={bulkRunning}
+              onClick={() => void relogin(abnormalTokens, true)}
+            >
+              全部尝试恢复
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 rounded-lg border-stone-200 bg-white text-rose-600 dark:text-rose-400"
+              disabled={isDeleting}
+              onClick={() => askDelete(abnormalTokens, "全部异常账号")}
+            >
+              全部移除
+            </Button>
+          </div>
+        ) : null}
+
+        {isLoading && accounts.length === 0 ? (
+          <div className="flex items-center justify-center gap-2 py-16 text-sm text-stone-500">
+            <LoaderCircle className="size-4 animate-spin" />
+            正在加载账号
+          </div>
+        ) : (
+          <>
+            <AccountsTable rows={rows} selected={selected} busy={busy} actions={actions} onToggle={toggle} onToggleAll={toggleAll} />
+            {rows.length === 0 ? (
+              <div className="py-14 text-center text-sm text-stone-500">
+                {accounts.length === 0 ? "号池里还没有账号。点右上角「添加账号」导入。" : "没有匹配的账号。换个筛选条件试试。"}
+              </div>
+            ) : null}
+          </>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-stone-200 px-4 py-2.5 text-sm text-stone-500">
+          <span>{filtered.length ? `第 ${start + 1}–${start + rows.length} 个，共 ${filtered.length} 个` : "共 0 个"}</span>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 rounded-lg"
+              disabled={safePage <= 1}
+              onClick={() => setPage(safePage - 1)}
+            >
+              <ChevronLeft className="size-4" />
+            </Button>
+            {pagerItems(safePage, pageCount).map((item, index) =>
+              item === "…" ? (
+                <span key={`gap-${index}`} className="px-1 text-stone-400">
+                  …
+                </span>
+              ) : (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setPage(item)}
+                  className={cn(
+                    "h-8 min-w-8 rounded-lg px-2 tabular-nums hover:bg-stone-100",
+                    item === safePage && "border border-stone-200 bg-white font-semibold text-stone-900 shadow-sm",
+                  )}
+                >
+                  {item}
+                </button>
+              ),
+            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 rounded-lg"
+              disabled={safePage >= pageCount}
+              onClick={() => setPage(safePage + 1)}
+            >
+              <ChevronRight className="size-4" />
+            </Button>
+          </div>
+          <Select value={pageSize} onValueChange={(value) => setFilter(() => setPageSize(value))}>
+            <SelectTrigger className="h-8 w-[100px] rounded-lg border-stone-200 bg-white text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {["10", "20", "50", "100"].map((value) => (
+                <SelectItem key={value} value={value}>
+                  {value} / 页
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </section>
+
+      <AccountDrawer
+        account={drawerAccount}
+        open={Boolean(drawer?.open)}
+        onClose={() => setDrawer((prev) => prev && { ...prev, open: false })}
+        busy={busy}
+        actions={actions}
+        saving={isUpdating}
+        onSave={(token, patch) => void saveAccount(token, patch)}
+        testingProxy={isTestingProxy}
+        onTestProxy={(proxy) => void checkProxy(proxy)}
+      />
+
+      <AccountImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        disabled={busyAll}
+        onImported={(items) => {
+          applyItems(items);
+          setSelected(new Set());
+          setPage(1);
+        }}
+      />
+      <PasswordImportDialog
+        open={passwordOpen}
+        onOpenChange={setPasswordOpen}
+        disabled={busyAll}
+        onProgress={setPasswordProgress}
+        onFinished={() => void loadAccounts(true)}
+      />
+
+      <Dialog open={modelsOpen} onOpenChange={setModelsOpen}>
+        <DialogContent className="rounded-2xl p-6">
+          <DialogHeader>
+            <DialogTitle>系统可用模型</DialogTitle>
+            <DialogDescription>点一下复制模型名。</DialogDescription>
+          </DialogHeader>
+          <div className="flex max-h-[50vh] flex-wrap gap-1.5 overflow-y-auto">
+            {models.length === 0 ? <span className="text-sm text-stone-400">当前没有可用模型</span> : null}
+            {models.map((model) => (
+              <button
+                key={model.id}
+                type="button"
+                className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1 font-mono text-xs text-stone-700 hover:bg-stone-100"
+                onClick={() => void copyText(model.id).then(() => toast.success(`已复制 ${model.id}`))}
+              >
+                {model.id}
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(confirm)} onOpenChange={(open) => (!open ? setConfirm(null) : null)}>
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader>
+            <DialogTitle>{confirm?.title}</DialogTitle>
+            <DialogDescription className="leading-6">{confirm?.description}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" className="rounded-lg" onClick={() => setConfirm(null)}>
               取消
             </Button>
             <Button
-              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
-              onClick={() => void handleUpdateAccount()}
-              disabled={isUpdating}
+              className="rounded-lg bg-rose-600 text-white hover:bg-rose-700"
+              disabled={isDeleting}
+              onClick={() => {
+                const run = confirm?.run;
+                setConfirm(null);
+                void run?.();
+              }}
             >
-              {isUpdating ? <LoaderCircle className="size-4 animate-spin" /> : null}
-              保存修改
+              {confirm?.confirmLabel}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <section className="space-y-3">
-        <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-          {metricCards.map((item) => {
-            const Icon = item.icon;
-            const value = (refreshSummary ?? summary)[item.key];
-            return (
-              <Card key={item.key} className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-                <CardContent className="p-4">
-                  <div className="mb-4 flex items-start justify-between">
-                    <span className="text-xs font-medium text-stone-400">{item.label}</span>
-                    <Icon className="size-4 text-stone-400" />
-                  </div>
-                  <div className={cn("text-[1.75rem] font-semibold tracking-tight", item.color)}>
-                    <span className={typeof value === "number" ? "" : "text-[1.1rem]"}>
-                      {typeof value === "number" ? formatCompact(value) : value}
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="p-4">
-            <div className="mb-3 text-sm font-medium text-stone-700">
-              系统可用模型
-              <span className="ml-1 text-stone-400">({availableModels.length})</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {availableModels.length > 0 ? (
-                availableModels.map((model) => (
-                  <button
-                    key={model.id}
-                    type="button"
-                    className="inline-flex cursor-pointer items-center rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs font-medium text-stone-700 transition hover:border-stone-300 hover:bg-stone-50"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(model.id);
-                      toast.success("模型名已复制");
-                    }}
-                    title={`点击复制 ${model.id}`}
-                  >
-                    <img
-                      src="/openai.svg"
-                      alt=""
-                      aria-hidden="true"
-                      className="mr-1.5 size-3.5 shrink-0"
-                    />
-                    {model.id}
-                  </button>
-                ))
-              ) : isLoadingModels ? (
-                <span className="text-sm text-stone-400">正在加载模型列表...</span>
-              ) : (
-                <span className="text-sm text-stone-400">当前暂无可用模型</span>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-
-      <section className="space-y-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <h2 className="text-lg font-semibold tracking-tight">账户列表</h2>
-            <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
-              {filteredAccounts.length}
-            </Badge>
-          </div>
-
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-            <div className="relative min-w-[260px]">
-              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
-              <Input
-                value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setPage(1);
-                }}
-                placeholder="搜索邮箱"
-                className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
-              />
-            </div>
-            <Select
-              value={typeFilter}
-              onValueChange={(value) => {
-                setTypeFilter(value);
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountTypeOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={statusFilter}
-              onValueChange={(value) => {
-                setStatusFilter(value as AccountStatus | "all");
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountStatusOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        {isLoading && accounts.length === 0 ? (
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-            <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-              <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                <LoaderCircle className="size-5 animate-spin" />
-              </div>
-              <div className="space-y-1">
-                <p className="text-sm font-medium text-stone-700">正在加载账户</p>
-                <p className="text-sm text-stone-500">从后端同步账号列表和状态。</p>
-              </div>
-            </CardContent>
-          </Card>
-        ) : null}
-
-        <Card
-          className={cn(
-            "overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
-            isLoading && accounts.length === 0 ? "hidden" : "",
-          )}
-        >
-          <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                  onClick={() => void handleRefreshAccounts(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isRefreshing}
-                >
-                  {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-                  刷新选中账号信息和额度
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-amber-600 hover:bg-amber-50 hover:text-amber-700"
-                  onClick={() => void handleReLogin(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isRelogining}
-                  title="尝试密码登录恢复账号"
-                >
-                  {isRelogining ? <LoaderCircle className="size-4 animate-spin" /> : <LogIn className="size-4" />}
-                  尝试恢复异常账号
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                  onClick={() => void handleDeleteTokens(abnormalTokens)}
-                  disabled={abnormalTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  移除异常账号
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                  onClick={() => void handleDeleteTokens(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  删除所选
-                </Button>
-                {selectedIds.length > 0 ? (
-                  <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
-                    已选择 {selectedIds.length} 项
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[1240px] text-left">
-                <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
-                  <tr>
-                    <th className="w-12 px-4 py-3">
-                      <Checkbox
-                        checked={allCurrentSelected}
-                        onCheckedChange={(checked) => toggleSelectAll(Boolean(checked))}
-                      />
-                    </th>
-                    <th className="w-56 px-4 py-3">token</th>
-                    <th className="w-28 px-4 py-3">类型</th>
-                    <th className="w-24 px-4 py-3">来源</th>
-                    <th className="w-24 px-4 py-3">状态</th>
-                    <th className="w-56 px-4 py-3">账号信息</th>
-                    <th className="w-32 px-4 py-3">创建时间</th>
-                    <th className="w-24 px-4 py-3">额度</th>
-                    <th className="w-40 px-4 py-3">恢复时间</th>
-                    <th className="w-18 px-4 py-3">在途</th>
-                    <th className="w-18 px-4 py-3">成功</th>
-                    <th className="w-18 px-4 py-3">失败</th>
-                    <th className="w-80 px-4 py-3">测试</th>
-                    <th className="w-24 px-4 py-3">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {currentRows.map((account) => {
-                    const status = statusMeta[account.status];
-                    const chatTestStatus = account.chat_test_status || "未测试";
-                    const chatTestStatusClass =
-                      chatTestStatus === "可用"
-                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                        : chatTestStatus === "不可用"
-                          ? "border-rose-200 bg-rose-50 text-rose-700"
-                          : chatTestStatus === "测试失败"
-                            ? "border-amber-200 bg-amber-50 text-amber-700"
-                            : "border-stone-200 bg-stone-50 text-stone-500";
-                    const realChatTestStatus = account.real_chat_test_status || "未测试";
-                    const realChatTestStatusClass =
-                      realChatTestStatus === "可用"
-                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                        : realChatTestStatus === "不可用"
-                          ? "border-rose-200 bg-rose-50 text-rose-700"
-                          : realChatTestStatus === "测试失败"
-                            ? "border-amber-200 bg-amber-50 text-amber-700"
-                            : "border-stone-200 bg-stone-50 text-stone-500";
-                    const StatusIcon = status.icon;
-
-                    return (
-                      <tr
-                        key={account.access_token}
-                        className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
-                      >
-                        <td className="px-4 py-3">
-                          <Checkbox
-                            checked={selectedIds.includes(account.access_token)}
-                            onCheckedChange={(checked) => {
-                              setSelectedIds((prev) =>
-                                checked
-                                  ? Array.from(new Set([...prev, account.access_token]))
-                                  : prev.filter((item) => item !== account.access_token),
-                              );
-                            }}
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium tracking-tight text-stone-700">
-                              {maskToken(account.access_token)}
-                            </span>
-                            <button
-                              type="button"
-                              className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => {
-                                void navigator.clipboard.writeText(account.access_token);
-                                toast.success("token 已复制");
-                              }}
-                            >
-                              <Copy className="size-4" />
-                            </button>
-                            {account.has_auto_renewal ? (
-                              <span
-                                title="绿色钥匙：已配置自动续期凭据。Access Token 过期后，系统可尝试用 Session/Refresh Token 自动换取新令牌；这不代表账号当前对话一定可用。"
-                                aria-label="已配置自动续期凭据"
-                                className="text-emerald-600"
-                              >
-                                <KeyRound className="size-4" />
-                              </span>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-700">
-                            {displayAccountType(account)}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge variant="outline" className="rounded-md border-stone-200 text-stone-600">
-                            {displayAccountSource(account)}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex flex-col items-start gap-1">
-                            <Badge
-                              variant={status.badge}
-                              className="inline-flex items-center gap-1 rounded-md px-2 py-1"
-                            >
-                              <StatusIcon className="size-3.5" />
-                              {account.status}
-                            </Badge>
-                            {account.last_relogin_error ? (
-                              <Badge
-                                variant="danger"
-                                className="max-w-full cursor-help rounded-md px-1.5 py-0 text-[11px] whitespace-nowrap"
-                                title={`重登失败${account.relogin_fail_count ? `（累计 ${account.relogin_fail_count} 次）` : ""}：${account.last_relogin_error}${account.last_relogin_at ? `\n最近尝试：${new Date(account.last_relogin_at).toLocaleString("zh-CN")}` : ""}`}
-                              >
-                                重登失败{account.relogin_fail_count ? ` ×${account.relogin_fail_count}` : ""}
-                              </Badge>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1.5 text-xs leading-5 text-stone-500">
-                            <span>{account.email ?? "—"}</span>
-                            {account.has_plus_promo ? (
-                              <span
-                                title={account.promo_title || "已检测到 Plus 试用资格；这不代表账号当前对话一定可用。"}
-                                className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800"
-                              >
-                                <Gift className="size-3" />
-                                试用
-                              </span>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                          {(() => {
-                            const raw = (account as any).created_at;
-                            if (!raw) return "—";
-                            try {
-                              const d = new Date(raw + "Z");
-                              if (isNaN(d.getTime())) return String(raw).slice(0, 10);
-                              return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-                            } catch { return String(raw).slice(0, 10); }
-                          })()}
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge variant="info" className="rounded-md">
-                            {formatQuota(account)}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                          {(() => {
-                            const restore = formatRestoreAt(account.restore_at);
-                            return (
-                              <div className="space-y-0.5">
-                                {restore.relative ? <div className="font-medium text-stone-700">{restore.relative}</div> : null}
-                                <div>{restore.absolute}</div>
-                              </div>
-                            );
-                          })()}
-                        </td>
-                        <td className="px-4 py-3">
-                          {(() => {
-                            const inflight = account.image_inflight ?? 0;
-                            return (
-                              <span
-                                className={
-                                  inflight > 0
-                                    ? "font-semibold text-amber-600"
-                                    : "text-stone-400"
-                                }
-                                title={
-                                  inflight > 0
-                                    ? "当前正在生成的图片数。号池空闲时此值持续 > 0，说明并发槽位泄漏、该账号已被静默排除出调度"
-                                    : "当前无在途生图任务"
-                                }
-                              >
-                                {inflight}
-                              </span>
-                            );
-                          })()}
-                        </td>
-                        <td className="px-4 py-3 text-stone-500">{account.success}</td>
-                        <td className="px-4 py-3 text-stone-500">{account.fail}</td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1.5 text-stone-400">
-                            <button
-                              type="button"
-                              title="快速测试：发送固定最小对话，确认账号当前能否使用；测试对话会被隐藏。"
-                              aria-label="快速测试账号对话可用性"
-                              className="rounded-lg p-2 text-emerald-600 transition hover:bg-emerald-50 hover:text-emerald-700"
-                              onClick={() => void handleTestChatUsability([account.access_token])}
-                              disabled={testingChatTokens.has(account.access_token) || testingRealChatTokens.has(account.access_token)}
-                            >
-                              <Play className={cn("size-4", testingChatTokens.has(account.access_token) ? "animate-pulse" : "")} />
-                            </button>
-                            <span
-                              title={
-                                chatTestStatus === "测试失败"
-                                  ? account.chat_test_error || "上游暂时无法判断账号可用性"
-                                  : "快速测试状态：固定最小问题的结果；不会改变 Plus 试用或自动续期标识。"
-                              }
-                              className={cn(
-                                "inline-flex min-w-[4.75rem] items-center justify-center rounded-md border px-1.5 py-1 text-[11px] font-medium",
-                                chatTestStatusClass,
-                              )}
-                            >
-                              {testingChatTokens.has(account.access_token) ? "快：检测中" : `快：${chatTestStatus}`}
-                            </span>
-                            <button
-                              type="button"
-                              title="真实对话：发送一条随机短问题并保留在该 ChatGPT 账号历史中。"
-                              aria-label="真实对话测试账号可用性"
-                              className="rounded-lg p-2 text-sky-600 transition hover:bg-sky-50 hover:text-sky-700"
-                              onClick={() => void handleTestRealChat([account.access_token])}
-                              disabled={testingChatTokens.has(account.access_token) || testingRealChatTokens.has(account.access_token)}
-                            >
-                              <MessageCircle className={cn("size-4", testingRealChatTokens.has(account.access_token) ? "animate-pulse" : "")} />
-                            </button>
-                            <span
-                              title={
-                                realChatTestStatus === "测试失败"
-                                  ? account.real_chat_test_error || "上游暂时无法判断账号可用性"
-                                  : account.real_chat_test_prompt
-                                    ? `真实对话状态：${account.real_chat_test_prompt}`
-                                    : "真实对话状态：随机短问题会保留在 ChatGPT 历史中，不会改变 Plus 试用或自动续期标识。"
-                              }
-                              className={cn(
-                                "inline-flex min-w-[4.75rem] items-center justify-center rounded-md border px-1.5 py-1 text-[11px] font-medium",
-                                realChatTestStatusClass,
-                              )}
-                            >
-                              {testingRealChatTokens.has(account.access_token) ? "真：对话中" : `真：${realChatTestStatus}`}
-                            </span>
-                            {account.real_chat_test_conversation_url ? (
-                              <a
-                                href={account.real_chat_test_conversation_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                title="打开最近一次保留的真实测试对话"
-                                aria-label="打开最近一次真实测试对话"
-                                className="rounded-lg p-2 text-sky-600 transition hover:bg-sky-50 hover:text-sky-700"
-                              >
-                                <ExternalLink className="size-4" />
-                              </a>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1.5 text-stone-400">
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => openEditDialog(account)}
-                              disabled={isUpdating}
-                            >
-                              <Pencil className="size-4" />
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => void handleRefreshAccounts([account.access_token])}
-                              disabled={isRefreshing || refreshingTokens.has(account.access_token)}
-                            >
-                              <RefreshCw className={cn("size-4", (isRefreshing || refreshingTokens.has(account.access_token)) ? "animate-spin" : "")} />
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                              onClick={() => void handleDeleteTokens([account.access_token])}
-                              disabled={isDeleting}
-                            >
-                              <Trash2 className="size-4" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-
-              {!isLoading && currentRows.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                    <Search className="size-5" />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-stone-700">没有匹配的账户</p>
-                    <p className="text-sm text-stone-500">调整筛选条件或搜索关键字后重试。</p>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="border-t border-stone-100 px-4 py-4">
-              <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
-                <div className="shrink-0 text-sm text-stone-500">
-                显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
-                {Math.min(startIndex + Number(pageSize), filteredAccounts.length)} 条，共{" "}
-                {filteredAccounts.length} 条
-                </div>
-
-                <span className="shrink-0 text-sm leading-none text-stone-500">
-                  {safePage} / {pageCount} 页
-                </span>
-                <Select
-                  value={pageSize}
-                  onValueChange={(value) => {
-                    setPageSize(value);
-                    setPage(1);
-                  }}
-                >
-                  <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="10">10 / 页</SelectItem>
-                    <SelectItem value="20">20 / 页</SelectItem>
-                    <SelectItem value="50">50 / 页</SelectItem>
-                    <SelectItem value="100">100 / 页</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                  disabled={safePage <= 1}
-                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-                {paginationItems.map((item, index) =>
-                  item === "..." ? (
-                    <span key={`ellipsis-${index}`} className="px-1 text-sm text-stone-400">
-                      ...
-                    </span>
-                  ) : (
-                    <Button
-                      key={item}
-                      variant={item === safePage ? "default" : "outline"}
-                      className={cn(
-                        "h-10 min-w-10 shrink-0 rounded-lg px-3",
-                        item === safePage
-                          ? "bg-stone-950 text-white hover:bg-stone-800"
-                          : "border-stone-200 bg-white text-stone-700",
-                      )}
-                      onClick={() => setPage(item)}
-                    >
-                      {item}
-                    </Button>
-                  ),
-                )}
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                  disabled={safePage >= pageCount}
-                  onClick={() => setPage((prev) => Math.min(pageCount, prev + 1))}
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
     </>
   );
 }
