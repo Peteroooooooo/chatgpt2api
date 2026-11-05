@@ -1724,6 +1724,28 @@ class AccountService:
             return dict(account)
         return None
 
+    # Phrases the OAuth token endpoint uses when the refresh_token itself is gone.
+    _SESSION_ENDED_REFRESH_MARKERS = (
+        "session has ended",
+        "refresh_token_invalidated",
+        "refresh_token_expired",
+        "refresh_token_reused",
+        "invalid_grant",
+    )
+
+    @classmethod
+    def _is_session_ended_refresh_error(cls, error: str) -> bool:
+        text = str(error or "").lower()
+        return "oauth_refresh_http_401" in text and any(marker in text for marker in cls._SESSION_ENDED_REFRESH_MARKERS)
+
+    def _refresh_failed_with_session_ended(self, access_token: str, error_at_before: Any) -> bool:
+        """Whether the refresh attempt just made failed because the session ended."""
+        account = self.get_account(access_token) or {}
+        error_at = account.get("last_token_refresh_error_at")
+        if not error_at or error_at == error_at_before:
+            return False
+        return self._is_session_ended_refresh_error(str(account.get("last_token_refresh_error") or ""))
+
     def fetch_remote_info(
         self,
         access_token: str,
@@ -1742,6 +1764,7 @@ class AccountService:
             finally:
                 backend.close()
         except InvalidAccessTokenError as exc:
+            refresh_error_before = (self.get_account(active_token) or {}).get("last_token_refresh_error_at")
             refreshed_token = self.refresh_access_token(active_token, force=True, event=f"{event}:invalid_access_token")
             if refreshed_token and refreshed_token != active_token:
                 try:
@@ -1761,11 +1784,15 @@ class AccountService:
                     raise
                 active_token = refreshed_token
             else:
+                # A rejected access token plus a refresh_token the auth server
+                # says is dead (HTTP 401, session ended) is definitive: skip the
+                # 3-strike deferral. Other refresh failures stay deferred.
+                session_ended = self._refresh_failed_with_session_ended(active_token, refresh_error_before)
                 if self._record_invalid_token_seen(
                     active_token,
                     event,
                     str(exc),
-                    defer_invalid_removal=defer_invalid_removal,
+                    defer_invalid_removal=defer_invalid_removal and not session_ended,
                 ):
                     self.remove_invalid_token(active_token, event)
                 raise
