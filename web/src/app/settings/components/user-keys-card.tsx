@@ -16,7 +16,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKey } from "@/lib/api";
+import {
+  createUserKey,
+  deleteUserKey,
+  fetchModelCatalog,
+  fetchUserKeys,
+  updateUserKey,
+  type UserKey,
+} from "@/lib/api";
 
 function formatDateTime(value?: string | null) {
   if (!value) {
@@ -35,6 +42,60 @@ function formatDateTime(value?: string | null) {
   }).format(date);
 }
 
+function sameModels(a: string[], b: string[]) {
+  return [...a].sort().join("|") === [...b].sort().join("|");
+}
+
+/** Chips for the models a key may use; nothing selected = every exposed model. */
+function ModelPicker({
+  options,
+  value,
+  onChange,
+}: {
+  options: string[] | null;
+  value: string[];
+  onChange: (value: string[]) => void;
+}) {
+  const all = [...(options ?? []), ...value.filter((model) => !(options ?? []).includes(model))];
+  return (
+    <div className="space-y-2">
+      <label className="text-sm font-medium text-stone-700">可用模型</label>
+      {options === null ? (
+        <div className="flex items-center gap-2 text-xs text-stone-400">
+          <LoaderCircle className="size-3.5 animate-spin" />
+          正在加载模型列表…
+        </div>
+      ) : (
+        <div className="flex max-h-48 flex-wrap gap-1.5 overflow-y-auto">
+          {all.map((model) => {
+            const pressed = value.includes(model);
+            return (
+              <button
+                key={model}
+                type="button"
+                aria-pressed={pressed}
+                onClick={() => onChange(pressed ? value.filter((item) => item !== model) : [...value, model])}
+                className={`rounded-full border px-2.5 py-0.5 font-mono text-xs transition-colors ${
+                  pressed
+                    ? "border-stone-900 bg-stone-900 text-white"
+                    : "border-stone-200 bg-white text-stone-500 hover:border-stone-400"
+                }`}
+              >
+                {model}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <p className="text-xs leading-5 text-stone-500">
+        {value.length
+          ? `只能用选中的 ${value.length} 个模型，请求其它模型会被拒绝（403），/v1/models 也只列出这些。`
+          : "一个都不选 = 能用所有对外显示的模型。搜索接口按「模型管理」里设置的搜索模型检查。"}
+      </p>
+    </div>
+  );
+}
+
 export function UserKeysCard() {
   const didLoadRef = useRef(false);
   const [items, setItems] = useState<UserKey[]>([]);
@@ -48,6 +109,21 @@ export function UserKeysCard() {
   const [editingItem, setEditingItem] = useState<UserKey | null>(null);
   const [editName, setEditName] = useState("");
   const [editKey, setEditKey] = useState("");
+  const [allowedModels, setAllowedModels] = useState<string[]>([]);
+  const [editAllowedModels, setEditAllowedModels] = useState<string[]>([]);
+  const [modelOptions, setModelOptions] = useState<string[] | null>(null);
+
+  const loadModelOptions = () => {
+    if (modelOptions !== null) {
+      return;
+    }
+    void fetchModelCatalog()
+      .then((data) => setModelOptions(data.key_model_options))
+      .catch((error) => {
+        setModelOptions([]);
+        toast.error(error instanceof Error ? error.message : "加载模型列表失败");
+      });
+  };
 
   const load = async () => {
     setIsLoading(true);
@@ -72,10 +148,11 @@ export function UserKeysCard() {
   const handleCreate = async () => {
     setIsCreating(true);
     try {
-      const data = await createUserKey(name.trim());
+      const data = await createUserKey(name.trim(), allowedModels);
       setItems(data.items);
       setRevealedKey(data.key);
       setName("");
+      setAllowedModels([]);
       setIsDialogOpen(false);
       toast.success("用户密钥已创建");
     } catch (error) {
@@ -132,6 +209,8 @@ export function UserKeysCard() {
     setEditingItem(item);
     setEditName(item.name);
     setEditKey("");
+    setEditAllowedModels(item.allowed_models ?? []);
+    loadModelOptions();
   };
 
   const handleEdit = async () => {
@@ -141,7 +220,8 @@ export function UserKeysCard() {
     const item = editingItem;
     const trimmedName = editName.trim();
     const trimmedKey = editKey.trim();
-    if (trimmedName === item.name && !trimmedKey) {
+    const modelsChanged = !sameModels(editAllowedModels, item.allowed_models ?? []);
+    if (trimmedName === item.name && !trimmedKey && !modelsChanged) {
       setEditingItem(null);
       return;
     }
@@ -150,11 +230,12 @@ export function UserKeysCard() {
       const data = await updateUserKey(item.id, {
         ...(trimmedName !== item.name ? { name: trimmedName } : {}),
         ...(trimmedKey ? { key: trimmedKey } : {}),
+        ...(modelsChanged ? { allowed_models: editAllowedModels } : {}),
       });
       setItems(data.items);
       setEditingItem(null);
       setEditKey("");
-      toast.success(trimmedKey ? "用户密钥已更新" : "用户名称已更新");
+      toast.success(trimmedKey ? "用户密钥已更新" : "用户密钥设置已更新");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新用户密钥失败");
     } finally {
@@ -185,7 +266,10 @@ export function UserKeysCard() {
                 <p className="text-sm text-stone-500">为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。</p>
               </div>
             </div>
-            <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => setIsDialogOpen(true)}>
+            <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => {
+              setIsDialogOpen(true);
+              loadModelOptions();
+            }}>
               <Plus className="size-4" />
               创建用户密钥
             </Button>
@@ -233,6 +317,9 @@ export function UserKeysCard() {
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
                         <span>创建时间 {formatDateTime(item.created_at)}</span>
                         <span>最近使用 {formatDateTime(item.last_used_at)}</span>
+                        <span className="max-w-full truncate" title={(item.allowed_models ?? []).join(", ") || undefined}>
+                          可用模型 {(item.allowed_models ?? []).length ? (item.allowed_models ?? []).join("、") : "全部对外模型"}
+                        </span>
                       </div>
                     </div>
 
@@ -299,6 +386,7 @@ export function UserKeysCard() {
               className="h-11 rounded-xl border-stone-200 bg-white"
             />
           </div>
+          <ModelPicker options={modelOptions} value={allowedModels} onChange={setAllowedModels} />
           <DialogFooter>
             <Button
               type="button"
@@ -366,7 +454,7 @@ export function UserKeysCard() {
           <DialogHeader className="gap-2">
             <DialogTitle>编辑用户密钥</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              可以修改备注名称；如需更换专用密钥，直接填写新的原始密钥即可。留空则保持当前密钥不变。
+              可以修改备注名称和可用模型；如需更换专用密钥，直接填写新的原始密钥即可。留空则保持当前密钥不变。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -391,6 +479,7 @@ export function UserKeysCard() {
                 保存后旧密钥会立即失效，新密钥生效。系统仍只保存哈希，不会回显当前密钥。
               </p>
             </div>
+            <ModelPicker options={modelOptions} value={editAllowedModels} onChange={setEditAllowedModels} />
           </div>
           <DialogFooter>
             <Button
