@@ -9,6 +9,7 @@ from threading import Lock
 from typing import Literal
 
 from services.config import config
+from services.model_rules import clean_model_list
 from services.storage.base import StorageBackend
 
 AuthRole = Literal["admin", "user"]
@@ -50,6 +51,10 @@ class AuthService:
         name = self._clean(raw.get("name")) or self._default_name(role)
         created_at = self._clean(raw.get("created_at")) or _now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
+        try:
+            allowed_models = clean_model_list(raw.get("allowed_models"))
+        except ValueError:
+            allowed_models = []
         return {
             "id": item_id,
             "name": name,
@@ -58,6 +63,7 @@ class AuthService:
             "enabled": bool(raw.get("enabled", True)),
             "created_at": created_at,
             "last_used_at": last_used_at,
+            "allowed_models": allowed_models,
         }
 
     def _load(self) -> list[dict[str, object]]:
@@ -84,6 +90,7 @@ class AuthService:
             "enabled": bool(item.get("enabled", True)),
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
+            "allowed_models": list(item.get("allowed_models") or []),
         }
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
@@ -147,7 +154,15 @@ class AuthService:
             raise ValueError("这个名称已经在使用中了，换一个更容易区分的名称吧")
         return candidate
 
-    def create_key(self, *, role: AuthRole, name: str = "") -> tuple[dict[str, object], str]:
+    def create_key(
+        self,
+        *,
+        role: AuthRole,
+        name: str = "",
+        allowed_models: list[str] | None = None,
+    ) -> tuple[dict[str, object], str]:
+        """allowed_models: empty = every exposed model; ignored for admin keys at request time."""
+        models = clean_model_list(allowed_models)
         with self._lock:
             self._reload_locked()
             normalized_name = self._build_name_locked(name, role=role)
@@ -166,6 +181,7 @@ class AuthService:
                 "enabled": True,
                 "created_at": _now_iso(),
                 "last_used_at": None,
+                "allowed_models": models,
             }
             self._items.append(item)
             self._save()
@@ -198,6 +214,8 @@ class AuthService:
                     )
                 if "enabled" in updates and updates.get("enabled") is not None:
                     next_item["enabled"] = bool(updates.get("enabled"))
+                if "allowed_models" in updates and updates.get("allowed_models") is not None:
+                    next_item["allowed_models"] = clean_model_list(updates.get("allowed_models"))
                 if "key" in updates and updates.get("key") is not None:
                     next_item["key_hash"] = self._build_key_hash_locked(str(updates.get("key") or ""), exclude_id=normalized_id)
                 self._items[index] = next_item

@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.image_inputs import parse_image_edit_request, read_image_sources
-from api.support import require_identity, resolve_image_base_url
+from api.support import key_allowed_models, require_identity, require_model_allowed, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
 from services.log_service import LoggedCall
@@ -82,11 +82,18 @@ def create_router() -> APIRouter:
 
     @router.get("/v1/models")
     async def list_models(authorization: str | None = Header(default=None)):
-        require_identity(authorization)
+        identity = require_identity(authorization)
         try:
-            return await run_in_threadpool(openai_v1_models.list_models)
+            result = await run_in_threadpool(openai_v1_models.list_models)
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        allowed = key_allowed_models(identity)
+        if allowed is not None and isinstance(result.get("data"), list):
+            result = {
+                **result,
+                "data": [item for item in result["data"] if isinstance(item, dict) and item.get("id") in allowed],
+            }
+        return result
 
     @router.post("/v1/images/generations")
     async def generate_images(
@@ -95,6 +102,7 @@ def create_router() -> APIRouter:
             authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
+        require_model_allowed(identity, body.model)
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
@@ -110,6 +118,7 @@ def create_router() -> APIRouter:
         payload, image_sources, mask_sources = await parse_image_edit_request(request)
         prompt = str(payload["prompt"])
         model = str(payload["model"])
+        require_model_allowed(identity, model)
         call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt)
         await filter_or_log(call, prompt)
         payload["images"] = await read_image_sources(image_sources)
@@ -123,6 +132,7 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
+        require_model_allowed(identity, model)
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
         call = LoggedCall(
             identity,
@@ -140,6 +150,7 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
+        require_model_allowed(identity, model)
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
         call = LoggedCall(
             identity,
@@ -162,6 +173,7 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
+        require_model_allowed(identity, model)
         request_preview = request_text(payload.get("system"), payload.get("messages"), payload.get("tools"))
         call = LoggedCall(identity, "/v1/messages", model, "Messages", request_text=request_preview)
         await filter_or_log(call, request_preview)
@@ -170,7 +182,9 @@ def create_router() -> APIRouter:
     @router.post("/v1/search")
     async def search(body: SearchRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        call = LoggedCall(identity, "/v1/search", openai_search.MODEL, "搜索", request_text=body.prompt)
+        search_model = openai_search.current_model()
+        require_model_allowed(identity, search_model)
+        call = LoggedCall(identity, "/v1/search", search_model, "搜索", request_text=body.prompt)
         await filter_or_log(call, body.prompt)
         return await call.run(openai_search.handle, body.model_dump(mode="python"))
 

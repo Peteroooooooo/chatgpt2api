@@ -27,13 +27,15 @@ class FakeAccounts:
     def __init__(self, accounts: list[dict[str, Any]]) -> None:
         self.accounts = accounts
         self.sent: list[str] = []
+        self.models: list[str | None] = []
         self.status = "可用"
 
     def list_accounts(self) -> list[dict[str, Any]]:
         return [dict(item) for item in self.accounts]
 
-    def test_real_chat(self, token: str) -> dict[str, Any]:
+    def test_real_chat(self, token: str, model: str | None = None) -> dict[str, Any]:
         self.sent.append(token)
+        self.models.append(model)
         return {"status": self.status, "prompt": "hi", "prompt_id": "gen:en-explain:00000000", "conversation_url": "https://chatgpt.com/c/x"}
 
 
@@ -130,6 +132,23 @@ class DailyChatTests(unittest.TestCase):
         self.assertEqual(done["state"], "done")
         self.assertEqual(done["result"], "可用")
         self.assertEqual(len(self.pending()), 4)
+
+    def test_send_uses_the_daily_chat_model_setting(self) -> None:
+        from unittest import mock
+
+        from services.model_rules import ModelRulesStore
+
+        store = ModelRulesStore(None)
+        store.update_features({"daily_chat_model": "gpt-6-mini"})
+        self.service.ensure_plan()
+        first = min(self.pending(), key=lambda item: item["scheduled_at"])
+        self.clock.moment = datetime.fromisoformat(first["scheduled_at"]) + timedelta(seconds=5)
+
+        with mock.patch("services.model_rules.model_rules_store", store):
+            self.service.tick()
+
+        self.assertEqual(self.accounts.models, ["gpt-6-mini"])
+        self.assertEqual(self.item_for(first["email"])["model"], "gpt-6-mini")
 
     def test_failed_send_is_not_retried_the_same_day(self) -> None:
         self.service.ensure_plan()

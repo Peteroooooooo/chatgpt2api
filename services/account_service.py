@@ -1331,33 +1331,38 @@ class AccountService:
             self,
             excluded_tokens: set[str] | None = None,
             model: str = "auto",
+            internal: bool = False,
     ) -> str:
+        """Pick an account for a text request under the model rules.
+
+        internal=True is for built-in features (search, tests): the model's exposed switch
+        does not apply, and a model no account type lists runs on any account.
+        Raises ModelUnavailableError when the model is hidden or no allowed account can run it.
+        """
         excluded = set(excluded_tokens or set())
         requested_model = str(model or "auto").strip() or "auto"
-        route = None
-        if requested_model != "auto":
-            from services.model_service import model_catalog_service
+        from services.model_service import ModelUnavailableError, model_catalog_service
 
-            route = model_catalog_service.route_for_model(requested_model)
+        route = model_catalog_service.resolve_route(requested_model, internal=internal)
         with self._lock:
             candidates = [
                 token
                 for account in self._accounts.values()
                 if account.get("status") not in {"禁用", "异常"}
                    and (
-                       route is None
+                       route.any_account
                        or self._normalize_account_type(account.get("type")) in route.account_types
                    )
                    and (token := account.get("access_token") or "")
                    and token not in excluded
             ]
             if not candidates:
-                if route is None or route.allow_anonymous:
+                if route.any_account or route.allow_anonymous:
                     return ""
-                from services.model_service import ModelUnavailableError
-
                 raise ModelUnavailableError(
-                    f"model {requested_model!r} is not available to any active account"
+                    f"模型 {requested_model} 现在没有账号能跑：允许接它的账号类型里没有可用账号",
+                    status_code=403,
+                    code="model_no_account",
                 )
             access_token = candidates[self._index % len(candidates)]
             self._index += 1
@@ -1912,10 +1917,18 @@ class AccountService:
             "error": error or None,
         }
 
-    def test_real_chat(self, access_token: str) -> dict[str, Any]:
-        """Send a varied real conversation and intentionally keep it visible upstream."""
+    def test_real_chat(self, access_token: str, model: str | None = None) -> dict[str, Any]:
+        """Send a varied real conversation and intentionally keep it visible upstream.
+
+        model defaults to the real-chat test model from the model management settings.
+        """
         if not access_token:
             raise ValueError("access_token is required")
+        if not str(model or "").strip():
+            from services.model_rules import model_rules_store
+
+            model = model_rules_store.feature_model("real_chat_model")
+        model = str(model).strip()
 
         active_token = self.refresh_access_token(
             access_token,
@@ -1952,7 +1965,7 @@ class AccountService:
                 for event in conversation_events(
                     backend,
                     messages=[{"role": "user", "content": prompt.text}],
-                    model="auto",
+                    model=model,
                     persist_conversation=True,
                 ):
                     conversation_id = str(event.get("conversation_id") or conversation_id)
@@ -1995,6 +2008,7 @@ class AccountService:
                     "token": anonymize_token(active_token),
                     "status": status,
                     "prompt_id": prompt.id,
+                    "model": model,
                     "conversation_id": conversation_id,
                     "conversation_kept": True,
                 },
@@ -2005,6 +2019,7 @@ class AccountService:
                 "status": status,
                 "checked_at": checked_at,
                 "error": error or None,
+                "model": model,
                 "prompt_id": prompt.id,
                 "prompt": prompt.text,
                 "conversation_id": conversation_id or None,
