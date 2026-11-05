@@ -1227,6 +1227,7 @@ export type PasswordImportItem = {
   error?: string | null;
   added?: boolean;
   updated?: boolean;
+  skipped?: boolean;
   detail?: string;
 };
 
