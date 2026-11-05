@@ -577,6 +577,7 @@ class AccountService:
     relogin_cooldown_seconds = 6 * 60 * 60
     auto_relogin_enabled = True
     relogin_without_password = True
+    push_auth_wait_seconds = 120
     _RELOGIN_FORCED_EVENTS = {"manual_relogin", "patrol"}
     _relogin_inflight: set[str] = set()
     _relogin_inflight_lock = Lock()
@@ -585,6 +586,8 @@ class AccountService:
         self.relogin_cooldown_seconds = max(0, int(settings.get("relogin_cooldown_hours", 6))) * 3600
         self.auto_relogin_enabled = bool(settings.get("auto_relogin_enabled", True))
         self.relogin_without_password = bool(settings.get("relogin_without_password", True))
+        # OpenAI drops an unanswered approval prompt after about 10 minutes.
+        self.push_auth_wait_seconds = min(600, max(0, int(settings.get("push_auth_wait_seconds", 120))))
 
     def relogin_credentials(self, account: dict) -> tuple[str, str] | None:
         """(email, password) to log in with; password is "" for an email-code login. None if impossible."""
@@ -682,6 +685,7 @@ class AccountService:
                         "new_token": anonymize_token(new_access_token),
                         "email": email,
                         "status": "成功",
+                        "via": result.get("login_via"),
                     },
                 )
                 if progress_id:
@@ -897,6 +901,7 @@ class AccountService:
                 pass
             
             login_started_at = datetime.now(timezone.utc)
+            login_via = "password" if password else "email_code"
             if password:
                 login_resp = session.post(
                     f"{auth_base}/api/accounts/password/verify",
@@ -960,8 +965,24 @@ class AccountService:
                 if page_type == "external_url" and "accounts.google.com" in continue_url:
                     return {"ok": False, "error": "google_sign_in_account", "detail": {"page": page_type}}
                 if page_type == "push_auth_verification":
-                    return {"ok": False, "error": "push_auth_required", "detail": {"page": page_type}}
-                if page_type == "email_otp_verification":
+                    from services.login_otp import complete_push_auth
+                    from services.mailbox.service import mailbox_service
+                    from utils.sentinel import build_sentinel_token
+
+                    def mfa_sentinel() -> dict:
+                        token, oai_sc = build_sentinel_token(session, device_id, "verify_mfa")
+                        if oai_sc:
+                            session.cookies.set("oai-sc", oai_sc, domain=".openai.com")
+                        return {"openai-sentinel-token": token}
+
+                    push_result = complete_push_auth(
+                        session, email, login_data, login_headers, mailbox_service, self.push_auth_wait_seconds, mfa_sentinel
+                    )
+                    if not push_result.get("ok"):
+                        return push_result
+                    auth_code = str(push_result.get("code") or "")
+                    login_via = str(push_result.get("via") or "")
+                elif page_type == "email_otp_verification":
                     from services.login_otp import complete_email_otp
                     from services.mailbox.service import mailbox_service
 
@@ -971,6 +992,7 @@ class AccountService:
                     if not otp_result.get("ok"):
                         return otp_result
                     auth_code = str(otp_result.get("code") or "")
+                    login_via = "email_code"
                 elif continue_url:
                     from services.login_otp import follow_to_auth_code
 
@@ -1061,6 +1083,7 @@ class AccountService:
                 "id_token": id_token,
                 "expires_at": jwt_payload.get("exp"),
                 "source_type": "password",
+                "login_via": login_via,
             }
             
             return result

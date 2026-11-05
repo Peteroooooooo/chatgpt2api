@@ -23,6 +23,7 @@ DEFAULT_SETTINGS = {
     "auto_relogin_enabled": True,
     "relogin_without_password": True,
     "relogin_cooldown_hours": 6,
+    "push_auth_wait_seconds": 120,
     "relogin_delay_min_seconds": 20,
     "relogin_delay_max_seconds": 60,
     "relogin_when_access_token_expires_within_hours": 48,
@@ -87,6 +88,7 @@ class AccountKeeper:
                 current[key] = f"{hour:02d}:{minute:02d}"
         if current["relogin_delay_max_seconds"] < current["relogin_delay_min_seconds"]:
             current["relogin_delay_max_seconds"] = current["relogin_delay_min_seconds"]
+        current["push_auth_wait_seconds"] = min(600, current["push_auth_wait_seconds"])
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         self.settings_file.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self._apply_policy(current)
