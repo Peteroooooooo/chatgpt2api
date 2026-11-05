@@ -65,6 +65,7 @@ type GroupKey = "schedule" | "relogin" | "pace";
 type ToggleKey = "patrol_enabled" | "auto_relogin_enabled" | "relogin_without_password";
 type NumberKey =
   | "relogin_cooldown_hours"
+  | "push_auth_wait_seconds"
   | "relogin_delay_min_seconds"
   | "relogin_delay_max_seconds"
   | "relogin_when_access_token_expires_within_hours"
@@ -100,6 +101,13 @@ const NUMBER_FIELDS: { key: NumberKey; group: GroupKey; label: string; unit: str
     label: "失败后冷却",
     unit: "小时",
     help: "自动重登失败后隔多久再试。巡检和手动重登不受限制。",
+  },
+  {
+    key: "push_auth_wait_seconds",
+    group: "relogin",
+    label: "等待手机批准",
+    unit: "秒",
+    help: "账号开了「在 ChatGPT App 里批准登录」时，先等这么久让你在手机上点批准，没批准就改用邮箱验证码。填 0 直接用验证码，最多 600。",
   },
   {
     key: "relogin_when_access_token_expires_within_hours",
@@ -351,10 +359,7 @@ function RunDetailDialog({
     const items = current?.entries ?? [];
     return problemsOnly ? items.filter((entry) => PROBLEM_RESULTS.has(entry.result)) : items;
   }, [current, problemsOnly]);
-  const problemCount = useMemo(
-    () => (current?.entries ?? []).filter((entry) => PROBLEM_RESULTS.has(entry.result)).length,
-    [current],
-  );
+  const problemCount = useMemo(() => (current?.entries ?? []).filter((entry) => PROBLEM_RESULTS.has(entry.result)).length, [current]);
 
   const errorText = (entry: PatrolEntry) => {
     const parts = [];
@@ -584,9 +589,15 @@ function PatrolContent() {
 
       <Tabs defaultValue="runs" className="space-y-4">
         <TabsList variant="line" className="justify-start">
-          <TabsTrigger value="runs" className="px-4">巡检记录</TabsTrigger>
-          <TabsTrigger value="settings" className="px-4">自动登录设置</TabsTrigger>
-          <TabsTrigger value="mailbox" className="px-4">邮箱与路由</TabsTrigger>
+          <TabsTrigger value="runs" className="px-4">
+            巡检记录
+          </TabsTrigger>
+          <TabsTrigger value="settings" className="px-4">
+            自动登录设置
+          </TabsTrigger>
+          <TabsTrigger value="mailbox" className="px-4">
+            邮箱与路由
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="settings">

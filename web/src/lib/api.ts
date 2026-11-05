@@ -1077,6 +1077,7 @@ export type KeeperSettings = {
   auto_relogin_enabled: boolean;
   relogin_without_password: boolean;
   relogin_cooldown_hours: number;
+  push_auth_wait_seconds: number;
   relogin_delay_min_seconds: number;
   relogin_delay_max_seconds: number;
   relogin_when_access_token_expires_within_hours: number;
