@@ -17,8 +17,9 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { fetchKeeperJob, startPasswordImport, type PasswordImportJob } from "@/lib/api";
 
-// 与后端 account_keeper.CREDENTIAL_LINE 一致，只用于提示识别到的行数。
+// 与后端 account_keeper.CREDENTIAL_LINE / EMAIL_ONLY_LINE 一致，只用于提示识别到的行数。
 const CREDENTIAL_LINE = /^([^\s:|]+@[^\s:|]+?)(?:----|[\t|:]|\s+)(.+)$/;
+const EMAIL_ONLY_LINE = /^([^\s:|@]+@[^\s:|@]+\.[^\s:|@-]+)$/;
 const POLL_INTERVAL_MS = 2000;
 
 function countCredentialLines(text: string) {
@@ -29,8 +30,10 @@ function countCredentialLines(text: string) {
       continue;
     }
     const match = CREDENTIAL_LINE.exec(line);
-    if (match && match[2].trim()) {
-      seen.add(match[1].trim().toLowerCase());
+    const bare = match ? null : EMAIL_ONLY_LINE.exec(line.replace(/[-:|\t ]+$/, ""));
+    const email = match && match[2].trim() ? match[1] : bare?.[1];
+    if (email) {
+      seen.add(email.trim().toLowerCase());
     }
   }
   return seen.size;
@@ -91,9 +94,9 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
             const ok = next.items.filter((item) => item.ok).length;
             const failed = next.items.length - ok;
             if (failed > 0) {
-              toast.warning(`邮箱密码导入完成：成功 ${ok} 个，失败 ${failed} 个`);
+              toast.warning(`邮箱登录导入完成：成功 ${ok} 个，失败 ${failed} 个`);
             } else {
-              toast.success(`邮箱密码导入完成：成功 ${ok} 个`);
+              toast.success(`邮箱登录导入完成：成功 ${ok} 个`);
             }
             onFinishedRef.current();
           }
@@ -113,7 +116,7 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
 
   const handleSubmit = async () => {
     if (lineCount === 0) {
-      toast.error("没有识别到 邮箱----密码 格式的行");
+      toast.error("没有识别到邮箱");
       return;
     }
     setIsSubmitting(true);
@@ -146,14 +149,15 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
           disabled={disabled}
         >
           {isRunning ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-          {isRunning && job ? `邮箱密码导入 ${job.done}/${job.total}` : "邮箱密码导入"}
+          {isRunning && job ? `邮箱登录导入 ${job.done}/${job.total}` : "邮箱登录导入"}
         </Button>
       )}
       <DialogContent showCloseButton={false} className="max-h-[90vh] overflow-y-auto rounded-2xl p-6">
         <DialogHeader className="gap-2">
-          <DialogTitle>邮箱密码导入</DialogTitle>
+          <DialogTitle>邮箱登录导入</DialogTitle>
           <DialogDescription className="text-sm leading-6">
-            一行一个账号，格式 邮箱----密码（也支持 : | 制表符 空格 分隔）。登录时如需邮箱验证码会按「邮箱路由」自动读取。
+            一行一个邮箱，系统会一个个登录。没有密码就只写邮箱，用邮箱验证码登录，这个域名要在「巡检 → 邮箱与路由」里配了收件；有密码写成
+            邮箱----密码（也支持 : | 制表符 空格 分隔）。
           </DialogDescription>
         </DialogHeader>
 
@@ -213,12 +217,12 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
         ) : (
           <div className="space-y-2">
             <Textarea
-              placeholder={"someone@example.com----password\nanother@example.com:password"}
+              placeholder={"abc@040601.xyz\nsomeone@duck.com\nanother@example.com----password"}
               value={text}
               onChange={(event) => setText(event.target.value)}
               className="min-h-48 rounded-xl border-stone-200 font-mono text-xs"
             />
-            <div className="text-xs text-stone-500">识别到 {lineCount} 个账号（同一邮箱只取第一行；已存在的账号会更新密码并重新登录）。</div>
+            <div className="text-xs text-stone-500">识别到 {lineCount} 个账号（同一邮箱只取第一行；号池里已有的账号会重新登录）。</div>
           </div>
         )}
 

@@ -15,6 +15,7 @@ from utils.helper import anonymize_token
 
 CN_TZ = timezone(timedelta(hours=8))
 CREDENTIAL_LINE = re.compile(r"^([^\s:|]+@[^\s:|]+?)(?:----|[\t|:]|\s+)(.+)$")
+EMAIL_ONLY_LINE = re.compile(r"^([^\s:|@]+@[^\s:|@]+\.[^\s:|@-]+)$")
 SETTINGS_FILE = DATA_DIR / "keeper.json"
 PATROL_DIR = DATA_DIR / "patrol"
 DEFAULT_SETTINGS = {
@@ -295,10 +296,11 @@ class AccountKeeper:
         thread.start()
         return thread
 
-    # ── email + password import ─────────────────────────────
+    # ── email (+ optional password) import ───────────────────
     @staticmethod
     def parse_credentials(text: str) -> list[tuple[str, str]]:
-        """One account per line: email----password, email:password, email|password or tab/space separated."""
+        """One account per line: email----password, email:password, email|password, tab/space separated,
+        or just the email (password "" = log in with an email code)."""
         result: list[tuple[str, str]] = []
         seen: set[str] = set()
         for raw in str(text or "").splitlines():
@@ -306,10 +308,14 @@ class AccountKeeper:
             if not line or line.startswith("#"):
                 continue
             match = CREDENTIAL_LINE.match(line)
-            if not match:
-                continue
-            email, password = match.group(1).strip(), match.group(2).strip()
-            if not password or email.lower() in seen:
+            if match:
+                email, password = match.group(1).strip(), match.group(2).strip()
+            else:
+                bare = EMAIL_ONLY_LINE.match(line.rstrip("-:|\t "))
+                if not bare:
+                    continue
+                email, password = bare.group(1), ""
+            if email.lower() in seen:
                 continue
             seen.add(email.lower())
             result.append((email, password))
@@ -332,7 +338,8 @@ class AccountKeeper:
                     result["detail"] = str(result["detail"])[:300]
                 job["items"].append(result)
                 job["done"] += 1
-                if index < len(credentials) - 1:
+                # Pause only after a real login attempt; a line rejected locally costs OpenAI nothing.
+                if index < len(credentials) - 1 and result.pop("attempted", True):
                     low = int(settings["relogin_delay_min_seconds"])
                     self._sleep(random.uniform(low, max(low, int(settings["relogin_delay_max_seconds"]))))
             job["state"] = "finished"
