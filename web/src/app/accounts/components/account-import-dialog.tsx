@@ -43,6 +43,9 @@ type ImportMethod = "menu" | "token" | "session" | "codex-auth" | "account-json"
 type AccountImportDialogProps = {
   disabled?: boolean;
   onImported: (items: Account[]) => void;
+  /** Pass to control the dialog from outside; the built-in trigger button is then not rendered. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 };
 
 type PendingAccountJsonImport = {
@@ -215,9 +218,12 @@ function MethodCard({
   );
 }
 
-export function AccountImportDialog({ disabled, onImported }: AccountImportDialogProps) {
+export function AccountImportDialog({ disabled, onImported, open: openProp, onOpenChange }: AccountImportDialogProps) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
+  const [innerOpen, setInnerOpen] = useState(false);
+  const controlled = openProp !== undefined;
+  const open = controlled ? openProp : innerOpen;
+  const setOpen = (next: boolean) => (controlled ? onOpenChange?.(next) : setInnerOpen(next));
   const [method, setMethod] = useState<ImportMethod>("menu");
   const [tokenInput, setTokenInput] = useState("");
   const [sessionInput, setSessionInput] = useState("");
@@ -814,14 +820,16 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   return (
     <>
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        <Button
-          className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
-          onClick={() => setOpen(true)}
-          disabled={disabled}
-        >
-          <Upload className="size-4" />
-          导入
-        </Button>
+        {controlled ? null : (
+          <Button
+            className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+            onClick={() => setOpen(true)}
+            disabled={disabled}
+          >
+            <Upload className="size-4" />
+            导入
+          </Button>
+        )}
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>

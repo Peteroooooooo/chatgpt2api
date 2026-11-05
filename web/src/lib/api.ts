@@ -52,6 +52,10 @@ export type Account = {
   real_chat_test_error?: string | null;
   real_chat_test_prompt?: string | null;
   real_chat_test_conversation_url?: string | null;
+  created_at?: string | null;
+  access_token_expires_at?: string | null;
+  auth_session_expires_at?: string | null;
+  last_token_refresh_at?: string | null;
 };
 
 export type AccountImportPayload = {

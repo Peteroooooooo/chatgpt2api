@@ -39,15 +39,25 @@ function countCredentialLines(text: string) {
 type PasswordImportDialogProps = {
   disabled?: boolean;
   onFinished: () => void;
+  /** Pass to control the dialog from outside; the built-in trigger button is then not rendered. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  /** Reports import progress so a page can show it while the dialog is closed. */
+  onProgress?: (progress: { done: number; total: number } | null) => void;
 };
 
-export function PasswordImportDialog({ disabled, onFinished }: PasswordImportDialogProps) {
-  const [open, setOpen] = useState(false);
+export function PasswordImportDialog({ disabled, onFinished, open: openProp, onOpenChange, onProgress }: PasswordImportDialogProps) {
+  const [innerOpen, setInnerOpen] = useState(false);
+  const controlled = openProp !== undefined;
+  const open = controlled ? openProp : innerOpen;
   const [text, setText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [job, setJob] = useState<PasswordImportJob | null>(null);
   const timerRef = useRef<number | null>(null);
   const onFinishedRef = useRef(onFinished);
+
+  // When controlled, a finished job stays visible on reopen; its "继续导入" button starts a new one.
+  const setOpen = (next: boolean) => (controlled ? onOpenChange?.(next) : setInnerOpen(next));
 
   useEffect(() => {
     onFinishedRef.current = onFinished;
@@ -58,6 +68,15 @@ export function PasswordImportDialog({ disabled, onFinished }: PasswordImportDia
   const progress = job && job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
   const okCount = job?.items.filter((item) => item.ok).length ?? 0;
   const failCount = (job?.items.length ?? 0) - okCount;
+  const onProgressRef = useRef(onProgress);
+
+  useEffect(() => {
+    onProgressRef.current = onProgress;
+  }, [onProgress]);
+
+  useEffect(() => {
+    onProgressRef.current?.(isRunning && job ? { done: job.done, total: job.total } : null);
+  }, [isRunning, job]);
 
   useEffect(() => {
     if (!job || job.state !== "running") {
@@ -119,15 +138,17 @@ export function PasswordImportDialog({ disabled, onFinished }: PasswordImportDia
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <Button
-        variant="outline"
-        className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-        onClick={openDialog}
-        disabled={disabled}
-      >
-        {isRunning ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-        {isRunning && job ? `邮箱密码导入 ${job.done}/${job.total}` : "邮箱密码导入"}
-      </Button>
+      {controlled ? null : (
+        <Button
+          variant="outline"
+          className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+          onClick={openDialog}
+          disabled={disabled}
+        >
+          {isRunning ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
+          {isRunning && job ? `邮箱密码导入 ${job.done}/${job.total}` : "邮箱密码导入"}
+        </Button>
+      )}
       <DialogContent showCloseButton={false} className="max-h-[90vh] overflow-y-auto rounded-2xl p-6">
         <DialogHeader className="gap-2">
           <DialogTitle>邮箱密码导入</DialogTitle>
