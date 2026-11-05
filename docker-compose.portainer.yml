@@ -48,7 +48,7 @@ services:
       start_period: 30s
 
   app:
-    image: ${CHATGPT2API_IMAGE:-ghcr.io/peteroooooooo/chatgpt2api:1.8.0-peter.9}
+    image: ${CHATGPT2API_IMAGE:-ghcr.io/peteroooooooo/chatgpt2api:1.8.0-peter.10}
     container_name: ${CHATGPT2API_CONTAINER_NAME:-chatgpt2api}
     restart: unless-stopped
     depends_on:
