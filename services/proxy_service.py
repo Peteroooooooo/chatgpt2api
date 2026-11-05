@@ -14,6 +14,7 @@ from urllib.parse import quote, urlparse
 from curl_cffi.requests import Session
 
 from services.config import config
+from utils import browser_profile
 
 
 FlareSolverrRequestMethod = Callable[[str, bytes, dict[str, str], float], bytes]
@@ -565,12 +566,13 @@ def test_proxy(url: str = "", *, timeout: float = 15.0) -> dict:
             "error": "invalid proxy url",
             **result_base,
         }
-    session = Session(impersonate="edge101", verify=True, proxy=candidate)
+    session = Session(
+        impersonate=browser_profile.IMPERSONATE, verify=True, proxy=candidate, headers=browser_profile.base_headers()
+    )
     started = time.perf_counter()
     try:
         response = session.get(
             "https://chatgpt.com/api/auth/csrf",
-            headers={"user-agent": "Mozilla/5.0 (chatgpt2api proxy test)"},
             timeout=timeout,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)

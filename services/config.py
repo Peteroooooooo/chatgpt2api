@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 
 from services.storage.base import StorageBackend
+from utils import browser_profile
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -48,11 +49,7 @@ DEFAULT_CHAT_COMPLETION_CACHE = {
     "drop_assistant_history": False,
 }
 
-DEFAULT_PROXY_RUNTIME_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
-)
+DEFAULT_PROXY_RUNTIME_USER_AGENT = browser_profile.USER_AGENT
 
 DEFAULT_PROXY_RUNTIME = {
     "enabled": False,

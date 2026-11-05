@@ -23,6 +23,7 @@ from services.real_chat_test_prompts import (
     REAL_CHAT_TEST_PROMPT_HISTORY_LIMIT,
     choose_real_chat_test_prompt,
 )
+from utils import browser_profile
 from utils.helper import anonymize_token
 
 
@@ -43,11 +44,7 @@ class AccountService:
     _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60
     _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
     _OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
-    _OAUTH_USER_AGENT = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
-    )
+    _OAUTH_USER_AGENT = browser_profile.USER_AGENT
     _CONVERSATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
     # 刷新进度追踪
@@ -410,7 +407,9 @@ class AccountService:
         from curl_cffi import requests
         from services.proxy_service import proxy_settings
 
-        session = requests.Session(**proxy_settings.build_session_kwargs(account=account, impersonate="chrome110", verify=True))
+        session = requests.Session(**proxy_settings.build_session_kwargs(
+            account=account, impersonate=browser_profile.IMPERSONATE, verify=True, headers=browser_profile.base_headers()
+        ))
         try:
             response = session.post(
                 self._OAUTH_TOKEN_URL,
@@ -834,8 +833,10 @@ class AccountService:
         # 创建 session（与上游请求走同一出口：账号代理 > 运行时代理 > 全局代理）
         from services.proxy_service import proxy_settings
 
-        session = requests.Session(**proxy_settings.build_session_kwargs(impersonate="chrome110", verify=False, upstream=True))
-        
+        session = requests.Session(**proxy_settings.build_session_kwargs(
+            impersonate=browser_profile.IMPERSONATE, verify=False, upstream=True, headers=browser_profile.base_headers()
+        ))
+
         try:
             device_id = str(uuid.uuid4())
             
@@ -876,9 +877,9 @@ class AccountService:
                     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                     "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
                     "user-agent": user_agent,
-                    "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
+                    "sec-ch-ua": browser_profile.SEC_CH_UA,
+                    "sec-ch-ua-mobile": browser_profile.SEC_CH_UA_MOBILE,
+                    "sec-ch-ua-platform": browser_profile.SEC_CH_UA_PLATFORM,
                     "sec-fetch-dest": "document",
                     "sec-fetch-mode": "navigate",
                     "sec-fetch-site": "cross-site",
@@ -922,9 +923,9 @@ class AccountService:
                 "origin": auth_base,
                 "priority": "u=1, i",
                 "user-agent": user_agent,
-                "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
+                "sec-ch-ua": browser_profile.SEC_CH_UA,
+                "sec-ch-ua-mobile": browser_profile.SEC_CH_UA_MOBILE,
+                "sec-ch-ua-platform": browser_profile.SEC_CH_UA_PLATFORM,
                 "sec-fetch-dest": "empty",
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-origin",
@@ -1087,9 +1088,9 @@ class AccountService:
                     "pragma": "no-cache",
                     "priority": "u=1, i",
                     "referer": f"{platform_base}/",
-                    "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
+                    "sec-ch-ua": browser_profile.SEC_CH_UA,
+                    "sec-ch-ua-mobile": browser_profile.SEC_CH_UA_MOBILE,
+                    "sec-ch-ua-platform": browser_profile.SEC_CH_UA_PLATFORM,
                     "sec-fetch-dest": "empty",
                     "sec-fetch-mode": "cors",
                     "sec-fetch-site": "same-site",
@@ -2288,7 +2289,9 @@ class AccountService:
         from services.signup import register_account
         from utils.sentinel import build_sentinel_token
 
-        session = requests.Session(**proxy_settings.build_session_kwargs(impersonate="chrome110", verify=False, upstream=True))
+        session = requests.Session(**proxy_settings.build_session_kwargs(
+            impersonate=browser_profile.IMPERSONATE, verify=False, upstream=True, headers=browser_profile.base_headers()
+        ))
         try:
             return register_account(
                 session,
