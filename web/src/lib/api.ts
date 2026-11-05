@@ -381,6 +381,8 @@ export type UserKey = {
   enabled: boolean;
   created_at: string | null;
   last_used_at: string | null;
+  /** Empty = the key may use every exposed model. */
+  allowed_models: string[];
 };
 
 export async function login(authKey: string) {
@@ -762,14 +764,17 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string) {
+export async function createUserKey(name: string, allowedModels: string[] = []) {
   return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
-    body: { name },
+    body: { name, allowed_models: allowedModels },
   });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; key?: string }) {
+export async function updateUserKey(
+  keyId: string,
+  updates: { enabled?: boolean; name?: string; key?: string; allowed_models?: string[] },
+) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
     body: updates,
@@ -1248,4 +1253,82 @@ export async function startPasswordImport(text: string) {
 
 export async function fetchKeeperJob(jobId: string) {
   return httpRequest<PasswordImportJob>(`/api/keeper/jobs/${encodeURIComponent(jobId)}`);
+}
+
+// ── Model management ───────────────────────────────────────────────
+
+export type ModelResult = "exposed" | "hidden" | "no_account";
+
+export type ModelAccessWarning = {
+  account_type: string;
+  model: string;
+  status: number;
+  at: string;
+  detail: string;
+};
+
+export type CatalogModel = {
+  id: string;
+  title: string;
+  reasoning_type: string;
+  tags: string[];
+  /** Account types whose model list contains this model. */
+  available_types: string[];
+  anonymous: boolean;
+  exposed: boolean;
+  /** Account types the rule allows (may include types not in the pool). */
+  account_types: string[];
+  rule_source: "default" | "admin" | "pending";
+  /** Allowed types that have the model and an active account. */
+  served_by: string[];
+  result: ModelResult;
+  warnings: ModelAccessWarning[];
+};
+
+export type CatalogAccountType = {
+  type: string;
+  label: string;
+  accounts: number;
+  models: string[];
+  fetched_at: string | null;
+  failed: boolean;
+};
+
+export type FeatureModels = {
+  search_model: string;
+  real_chat_model: string;
+  daily_chat_model: string;
+};
+
+export type ModelCatalog = {
+  refreshed_at: string | null;
+  cache_ttl_seconds: number;
+  default_policy: "free_exposed" | "all_exposed" | "all_hidden";
+  account_types: CatalogAccountType[];
+  anonymous: { models: string[]; fetched_at: string | null; failed: boolean };
+  models: CatalogModel[];
+  summary: Record<ModelResult, number>;
+  warnings: ModelAccessWarning[];
+  features: FeatureModels;
+  feature_defaults: FeatureModels;
+  feature_options: string[];
+  key_model_options: string[];
+};
+
+export type ModelRuleChange = { exposed?: boolean; account_types?: string[] };
+
+export async function fetchModelCatalog() {
+  return httpRequest<ModelCatalog>("/api/models/catalog");
+}
+
+export async function refreshModelCatalog() {
+  return httpRequest<ModelCatalog>("/api/models/refresh", { method: "POST" });
+}
+
+export async function saveModelRules(body: {
+  models?: Record<string, ModelRuleChange>;
+  features?: Partial<FeatureModels>;
+  default_policy?: ModelCatalog["default_policy"];
+}) {
+  return httpRequest<ModelCatalog>("/api/models/rules", { method: "PUT", body });
 }

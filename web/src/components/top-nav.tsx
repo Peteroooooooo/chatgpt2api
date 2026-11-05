@@ -22,6 +22,7 @@ const adminNavItems = [
   { href: "/logs", label: "日志管理" },
   { href: "/patrol", label: "巡检" },
   { href: "/daily-chat", label: "每日对话" },
+  { href: "/models", label: "模型管理" },
   { href: "/debug", label: "调试" },
   { href: "/settings", label: "设置" },
 ];
