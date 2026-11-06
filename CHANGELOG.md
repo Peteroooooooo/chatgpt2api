@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [修复] 用 session_token 续期时，chatgpt.com 可能返回 cookie 里缓存的、早已过期的 access token；之前把它当作续期成功并覆盖掉新 token，账号显示正常但请求全部 401。现在这种结果算续期失败，改用 refresh_token，仍失败则按原规则标记异常并自动重新登录。
 + [新增] 联网搜索改为真流式：`/v1/chat/completions` 与 `/v1/responses` 带 `web_search` 工具时，答案边生成边返回（实测约 5 秒出第一段字，原来要等 14–25 秒全部结束），最后一块附带来源列表和 `search_sources`。
 + [新增] 带 `web_search` 工具的请求使用请求里的模型（如 gpt-6-mini、auto），号池没有公开该模型时才用「内置功能」里设定的搜索模型；`/v1/search` 也可传 `model`。
 + [新增] 请求里的 system / developer 指令一起交给搜索模型（例如要求核对最新版本、回答更简短）。

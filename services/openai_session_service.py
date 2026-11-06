@@ -13,6 +13,7 @@ from utils import browser_profile
 
 SESSION_URL = "https://chatgpt.com/api/auth/session"
 DEFAULT_REFRESH_SKEW = timedelta(hours=1)
+STALE_SESSION_TOKEN_SKEW = timedelta(minutes=5)
 
 
 class SessionRefreshError(RuntimeError):
@@ -190,6 +191,12 @@ def refresh_chatgpt_session(account: dict[str, Any]) -> dict[str, Any]:
         raise SessionRefreshError("session refresh did not return accessToken")
 
     expires_at = access_token_expires_at(access_token)
+    if expires_at is not None and expires_at <= _now() + STALE_SESSION_TOKEN_SKEW:
+        # chatgpt.com keeps serving the access token cached in the session cookie after it
+        # expired; treating it as renewed would loop forever instead of using refresh_token.
+        raise SessionRefreshError(
+            f"session refresh returned an access token that expired at {_iso(expires_at)}"
+        )
     updates: dict[str, Any] = {
         "access_token": access_token,
         "session_token": session_token,
