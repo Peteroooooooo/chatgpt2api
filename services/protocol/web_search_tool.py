@@ -130,21 +130,18 @@ def text_with_url_citations(result: dict[str, Any]) -> tuple[str, list[dict[str,
             text += "\n\n"
         text += "Sources:\n"
         for index, source in enumerate(sources, start=1):
-            title = source["title"] or source["url"]
-            line_prefix = f"{index}. {title}"
-            text += line_prefix
-            if source["url"]:
-                if source["title"]:
-                    text += " - "
-                start = len(text)
-                text += source["url"]
-                annotations.append({
-                    "type": "url_citation",
-                    "start_index": start,
-                    "end_index": len(text),
-                    "url": source["url"],
-                    "title": source["title"] or source["url"],
-                })
+            text += f"{index}. "
+            if source["title"]:
+                text += f"{source['title']} - "
+            start = len(text)
+            text += source["url"]
+            annotations.append({
+                "type": "url_citation",
+                "start_index": start,
+                "end_index": len(text),
+                "url": source["url"],
+                "title": source["title"] or source["url"],
+            })
             text += "\n"
     return text.strip(), annotations
 
