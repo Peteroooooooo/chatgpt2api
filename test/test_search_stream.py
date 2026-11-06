@@ -7,7 +7,7 @@ from unittest import mock
 
 from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_chat_complete
-from services.protocol.web_search_tool import normalized_sources, search_prompt_from_messages
+from services.protocol.web_search_tool import normalized_sources, search_prompt_from_messages, text_with_url_citations
 from services.search_stream import SearchAnswerStream
 
 REF = {"turn_index": 7, "ref_type": "search", "ref_index": 3}
@@ -186,6 +186,16 @@ class StreamingSearchChatTests(unittest.TestCase):
             [item["url"] for item in normalized_sources(result)],
             ["https://blog.rust-lang.org/x/", "https://python.org/d/?keys=latest"],
         )
+
+    def test_source_without_title_is_listed_once(self) -> None:
+        text, annotations = text_with_url_citations({"answer": "A.", "sources": [
+            {"title": "", "url": "https://pypi.org/project/pydantic/"},
+            {"title": "Docs", "url": "https://docs.pydantic.dev/"},
+        ]})
+
+        self.assertEqual(text, "A.\n\nSources:\n1. https://pypi.org/project/pydantic/\n2. Docs - https://docs.pydantic.dev/")
+        self.assertEqual([text[a["start_index"]:a["end_index"]] for a in annotations],
+                         ["https://pypi.org/project/pydantic/", "https://docs.pydantic.dev/"])
 
     def test_search_prompt_keeps_instructions_and_last_question(self) -> None:
         messages = [
