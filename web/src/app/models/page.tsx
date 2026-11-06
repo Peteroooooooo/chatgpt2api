@@ -444,7 +444,7 @@ function ModelsContent() {
           <p className="text-sm text-stone-500">
             {catalog ? (
               <>
-                对外显示 {counts.shown} 个模型，{counts.noAccount}{" "}
+                对外显示 {counts.shown + (catalog.image_models?.length ?? 0)} 个模型，{counts.noAccount}{" "}
                 个打开了却没有账号能跑，{counts.hidden} 个不对外。上次拉取{" "}
                 {timeText(catalog.refreshed_at)}，每{" "}
                 {Math.round(catalog.cache_ttl_seconds / 60)} 分钟自动重新拉取。
@@ -492,15 +492,6 @@ function ModelsContent() {
               <span className="ml-1 text-rose-600">（上次拉取失败）</span>
             ) : null}
           </div>
-          {catalog.image_models?.length ? (
-            <div
-              className="rounded-xl border border-stone-200 bg-white px-3 py-2"
-              title="图片模型不在下表里，有账号就对外。名字只是入口，实际出图用的是 ChatGPT 网页当时的图片模型。"
-            >
-              <span className="font-medium text-stone-800">图片</span> ·{" "}
-              <span className="font-mono">{catalog.image_models.join("、")}</span> · 总是对外
-            </div>
-          ) : null}
         </div>
       ) : null}
 
@@ -690,6 +681,53 @@ function ModelsContent() {
                       );
                     }),
                   ])}
+                  {catalog.image_models?.length ? (
+                    <TableRow key="group-image" className="hover:bg-transparent">
+                      <TableCell
+                        colSpan={types.length + 6}
+                        className="bg-stone-50 py-1.5 text-xs tracking-wide text-stone-500"
+                      >
+                        图片
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                  {(catalog.image_models ?? []).map((id) => {
+                    const web = id === "gpt-image-2";
+                    return (
+                      <TableRow key={id} className="text-stone-600">
+                        <TableCell className="max-w-72">
+                          <div className="truncate font-mono text-[13px] text-stone-800" title={id}>
+                            {id}
+                          </div>
+                          <div className="text-xs text-stone-400">
+                            {web
+                              ? "出图用 ChatGPT 网页当时的图片模型（现在是 Images 2.6）"
+                              : "Codex 账号出图，先试 gpt-image-2.6-sunburst"}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-xs text-stone-500">出图</TableCell>
+                        {types.map((item) => (
+                          <TableCell key={item.type} className="text-center">
+                            <HaveMark has={web} />
+                          </TableCell>
+                        ))}
+                        <TableCell className="text-center">
+                          <HaveMark has={false} />
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs text-stone-400">总是对外</span>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs text-stone-400">不按账号类型分</span>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs text-emerald-700">
+                            对外，由{web ? "所有可用账号" : " Codex 账号"}接
+                          </span>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>
