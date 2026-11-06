@@ -614,8 +614,24 @@ class OpenAIBackendAPI:
             return "auto", ""
         model_name, separator, suffix = upstream_model.rpartition("-")
         if separator and suffix.lower() in {"standard", "extended", "max"}:
-            return model_name, suffix.lower()
-        return upstream_model, self._normalize_thinking_effort(config.default_thinking_effort)
+            upstream_model, effort = model_name, suffix.lower()
+        else:
+            effort = self._normalize_thinking_effort(config.default_thinking_effort)
+        if base_model == "gpt-image-2" and upstream_model != "auto" and not self._upstream_model_listed(upstream_model):
+            # ChatGPT retires model slugs; a stale setting must not pin a model that no longer exists.
+            logger.info({"event": "image_upstream_model_fallback", "configured": upstream_model, "used": "auto"})
+            return "auto", ""
+        return upstream_model, effort
+
+    @staticmethod
+    def _upstream_model_listed(model: str) -> bool:
+        """Whether the live ChatGPT catalog lists this model; True when the catalog cannot be read."""
+        try:
+            from services.model_service import model_catalog_service
+            listed = model_catalog_service.lists_model(model)
+        except Exception:  # noqa: BLE001 - never block an image request on the catalog
+            return True
+        return listed is not False
 
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
             Dict[str, str]:

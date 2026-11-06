@@ -148,6 +148,21 @@ class DefaultRuleTests(PoolFixture):
         # gpt-6 was Plus-only during the failed round, but its stored default saw Free too.
         self.assertTrue(stored["models"]["gpt-6"]["exposed"])
 
+    def test_switching_to_all_exposed_opens_every_untouched_model(self) -> None:
+        self.catalog.list_models()
+        self.catalog.rules.update_rules({"gpt-6": {"exposed": False}})
+
+        self.catalog.set_default_policy("all_exposed")
+        listed = self.listed()
+
+        for model in [*PLUS_ONLY, GATE_12, GATE_13]:
+            self.assertIn(model, listed)
+        # The admin's own switch survives the policy change.
+        self.assertNotIn("gpt-6", listed)
+        stored = json.loads(self.rules_path.read_text(encoding="utf-8"))
+        self.assertEqual(stored["default_policy"], "all_exposed")
+        self.assertTrue(stored["models"]["gpt-6-astra-wm"]["exposed"])
+
     def test_auto_goes_only_to_types_that_list_it(self) -> None:
         route = self.catalog.resolve_route("auto")
 

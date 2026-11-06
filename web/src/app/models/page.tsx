@@ -47,7 +47,7 @@ const REASONING_LABELS: Record<string, string> = {
 
 const POLICY_TEXT: Record<ModelCatalog["default_policy"], string> = {
   free_exposed: "Free 也有的默认显示；只有 Plus / Team / Pro 有的默认隐藏",
-  all_exposed: "默认显示",
+  all_exposed: "全部显示（含内部测试模型）",
   all_hidden: "默认隐藏，打开才对外",
 };
 
@@ -393,6 +393,18 @@ function ModelsContent() {
     }
   };
 
+  const handlePolicy = async (policy: ModelCatalog["default_policy"]) => {
+    setIsSaving(true);
+    try {
+      applyCatalog(await saveModelRules({ default_policy: policy }));
+      toast.success(`默认规则改为：${POLICY_TEXT[policy]}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const setRule = (id: string, update: (rule: Rule) => Rule) =>
     setDraft((prev) => ({ ...prev, [id]: update(prev[id]) }));
 
@@ -480,6 +492,15 @@ function ModelsContent() {
               <span className="ml-1 text-rose-600">（上次拉取失败）</span>
             ) : null}
           </div>
+          {catalog.image_models?.length ? (
+            <div
+              className="rounded-xl border border-stone-200 bg-white px-3 py-2"
+              title="图片模型不在下表里，有账号就对外。名字只是入口，实际出图用的是 ChatGPT 网页当时的图片模型。"
+            >
+              <span className="font-medium text-stone-800">图片</span> ·{" "}
+              <span className="font-mono">{catalog.image_models.join("、")}</span> · 总是对外
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -676,11 +697,34 @@ function ModelsContent() {
           {catalog ? (
             <div className="flex flex-wrap items-center gap-2 border-t border-stone-100 px-5 py-4">
               <span
-                className={`mr-auto text-xs ${dirtyCount ? "text-amber-600" : "text-stone-400"}`}
+                className={`mr-auto flex flex-wrap items-center gap-2 text-xs ${dirtyCount ? "text-amber-600" : "text-stone-400"}`}
               >
-                {dirtyCount
-                  ? `${dirtyCount} 个模型有未保存的修改`
-                  : `上游新出现的模型：${POLICY_TEXT[catalog.default_policy]}。请求被关掉或没有账号能跑的模型会直接报错，不会换成别的模型。`}
+                {dirtyCount ? (
+                  `${dirtyCount} 个模型有未保存的修改`
+                ) : (
+                  <>
+                    上游新出现的模型：
+                    <Select
+                      value={catalog.default_policy}
+                      onValueChange={(value) =>
+                        void handlePolicy(value as ModelCatalog["default_policy"])
+                      }
+                      disabled={isSaving}
+                    >
+                      <SelectTrigger className="h-8 w-auto rounded-lg border-stone-200 bg-white text-xs text-stone-700">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(Object.keys(POLICY_TEXT) as ModelCatalog["default_policy"][]).map((policy) => (
+                          <SelectItem key={policy} value={policy}>
+                            {POLICY_TEXT[policy]}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    换规则会重算你没手动改过的模型。请求被关掉或没有账号能跑的模型会直接报错，不会换成别的模型。
+                  </>
+                )}
               </span>
               {dirtyCount ? (
                 <Button

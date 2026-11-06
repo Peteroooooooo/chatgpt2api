@@ -1313,6 +1313,7 @@ export type ModelCatalog = {
   feature_defaults: FeatureModels;
   feature_options: string[];
   key_model_options: string[];
+  image_models?: string[];
 };
 
 export type ModelRuleChange = { exposed?: boolean; account_types?: string[] };
