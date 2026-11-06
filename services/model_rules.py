@@ -5,7 +5,7 @@ Rules live in data/model_rules.json:
     {
       "default_policy": "free_exposed",
       "models": {"gpt-6": {"exposed": true, "account_types": ["free", "Plus", ...]}},
-      "features": {"search_model": "gpt-5-5", ...}
+      "features": {"search_model": "auto", ...}
     }
 
 A model seen for the first time gets a rule from the default policy, which is then
@@ -41,7 +41,7 @@ ANONYMOUS = "anonymous"
 # Upstream tag for internal test models; they start hidden under every policy.
 HIDDEN_TAG = "hidden"
 FEATURE_DEFAULTS: dict[str, str] = {
-    "search_model": "gpt-5-5",
+    "search_model": "auto",
     "real_chat_model": "auto",
     "daily_chat_model": "auto",
 }

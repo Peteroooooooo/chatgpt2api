@@ -55,7 +55,7 @@ const FEATURES: { key: keyof FeatureModels; label: string; help: string }[] = [
   {
     key: "search_model",
     label: "联网搜索",
-    help: "/v1/search 和带 web_search 工具的对话请求用这个模型，只派给允许接它的账号。",
+    help: "/v1/search 和带 web_search 工具的对话请求：请求里写的模型号池有公开就用它，否则用这里选的模型（默认 auto）。只派给允许接它的账号。",
   },
   {
     key: "real_chat_model",
