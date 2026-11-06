@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [修复] 搜索来源列表去掉 ChatGPT 加的 `utm_source=chatgpt.com`，同一链接不再带参数和不带参数各列一次。
 + [调整] 联网搜索默认模型由 gpt-5-5 改为 auto：工具模式实测 auto 与 gpt-6-mini 事实题都是 16/16，auto 事实题中位 8.0 秒（gpt-6-mini 8.9 秒）、p90 16.6 秒（20.8 秒），开放题最慢 97 秒（140 秒），来源更多。
 + [修复] 搜索答案去掉更多网页组件：icon、grid、caption、spacer、svg 图示，以及 `{@body ...}` 开头的交互块（满意度问卷、单选题、按钮）。流式输出时这些块也不会先漏出半截。
 + [修复] 用 session_token 续期时，chatgpt.com 可能返回 cookie 里缓存的、早已过期的 access token；之前把它当作续期成功并覆盖掉新 token，账号显示正常但请求全部 401。现在这种结果算续期失败，改用 refresh_token，仍失败则按原规则标记异常并自动重新登录。

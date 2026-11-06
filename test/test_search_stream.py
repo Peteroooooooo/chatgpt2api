@@ -7,7 +7,7 @@ from unittest import mock
 
 from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_chat_complete
-from services.protocol.web_search_tool import search_prompt_from_messages
+from services.protocol.web_search_tool import normalized_sources, search_prompt_from_messages
 from services.search_stream import SearchAnswerStream
 
 REF = {"turn_index": 7, "ref_type": "search", "ref_index": 3}
@@ -174,6 +174,18 @@ class StreamingSearchChatTests(unittest.TestCase):
         self.assertIn("Sources:", deltas[2]["content"])
         self.assertEqual(chunks[2]["search_sources"][0]["url"], "https://example.com")
         self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+
+    def test_sources_drop_the_chatgpt_utm_tag_and_dedupe(self) -> None:
+        result = {"sources": [
+            {"title": "Rust", "url": "https://blog.rust-lang.org/x/"},
+            {"title": "Rust", "url": "https://blog.rust-lang.org/x/?utm_source=chatgpt.com"},
+            {"title": "Py", "url": "https://python.org/d/?keys=latest&utm_source=chatgpt.com"},
+        ]}
+
+        self.assertEqual(
+            [item["url"] for item in normalized_sources(result)],
+            ["https://blog.rust-lang.org/x/", "https://python.org/d/?keys=latest"],
+        )
 
     def test_search_prompt_keeps_instructions_and_last_question(self) -> None:
         messages = [

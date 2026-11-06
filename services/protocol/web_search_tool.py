@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from utils.answer_markup import clean_private_annotations
 
@@ -90,6 +91,16 @@ def clean_search_text(text: str) -> str:
     return clean_private_annotations(text)
 
 
+def clean_source_url(url: str) -> str:
+    """Drop the utm_source=chatgpt.com tag ChatGPT adds, so tagged and plain links dedupe."""
+    parts = urlsplit(url)
+    if "utm_source" not in parts.query:
+        return url
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if not (k == "utm_source" and v == "chatgpt.com")]
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
 def normalized_sources(result: dict[str, Any]) -> list[dict[str, str]]:
     sources = result.get("sources")
     if not isinstance(sources, list):
@@ -99,7 +110,7 @@ def normalized_sources(result: dict[str, Any]) -> list[dict[str, str]]:
     for item in sources:
         if not isinstance(item, dict):
             continue
-        url = str(item.get("url") or "").strip()
+        url = clean_source_url(str(item.get("url") or "").strip())
         title = str(item.get("title") or "").strip()
         snippet = str(item.get("snippet") or "").strip()
         if not url or url in seen:
