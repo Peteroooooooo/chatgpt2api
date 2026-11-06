@@ -18,6 +18,12 @@ PNG_1X1 = base64.b64decode(
 PNG_1X1_DATA_URL = "data:image/png;base64," + base64.b64encode(PNG_1X1).decode("ascii")
 
 
+def _search_events(result: dict, *deltas: str):
+    """What stream_web_search yields: answer deltas, then the finished result."""
+    texts = list(deltas) or [str(result.get("answer") or "")]
+    return iter([*({"type": "delta", "text": text} for text in texts if text), {"type": "done", "result": result}])
+
+
 class ChatCompletionCacheTests(unittest.TestCase):
     def setUp(self) -> None:
         self.old_cache_settings = config.data.get("chat_completion_cache")
@@ -419,10 +425,10 @@ class ChatCompletionCacheTests(unittest.TestCase):
             "tools": [{"type": "web_search"}],
         }
 
-        with mock.patch("services.protocol.openai_v1_response.run_web_search", return_value=search_result) as search:
+        with mock.patch("services.protocol.openai_v1_response.stream_web_search", return_value=_search_events(search_result)) as search:
             response = openai_v1_response.handle(body)
 
-        search.assert_called_once_with("latest example news")
+        search.assert_called_once_with("latest example news", "auto")
         self.assertEqual(response["output"][0]["type"], "web_search_call")
         self.assertEqual(response["output"][0]["status"], "completed")
         self.assertEqual(response["output"][0]["action"]["query"], "latest example news")
@@ -445,7 +451,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
             "tools": [{"type": "web_search_preview"}],
         }
 
-        with mock.patch("services.protocol.openai_v1_response.run_web_search", return_value=search_result):
+        with mock.patch("services.protocol.openai_v1_response.stream_web_search", return_value=_search_events(search_result)):
             events = list(openai_v1_response.handle(body))
 
         event_types = [event["type"] for event in events]
@@ -467,10 +473,10 @@ class ChatCompletionCacheTests(unittest.TestCase):
             "tools": [{"type": "web_search_preview_2025_03_11"}],
         }
 
-        with mock.patch("services.protocol.openai_v1_response.run_web_search", return_value=search_result) as search:
+        with mock.patch("services.protocol.openai_v1_response.stream_web_search", return_value=_search_events(search_result)) as search:
             response = openai_v1_response.handle(body)
 
-        search.assert_called_once_with("versioned search")
+        search.assert_called_once_with("versioned search", "auto")
         self.assertEqual(response["output"][0]["type"], "web_search_call")
         self.assertIn("Versioned search answer.", response["output"][1]["content"][0]["text"])
 
@@ -488,7 +494,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
         with mock.patch("services.protocol.openai_v1_chat_complete.run_web_search", return_value=search_result) as search:
             response = openai_v1_chat_complete.handle(body)
 
-        search.assert_called_once_with("search chat")
+        search.assert_called_once_with("search chat", "auto")
         message = response["choices"][0]["message"]
         self.assertIn("Chat search answer.", message["content"])
         self.assertEqual(message["annotations"][0]["type"], "url_citation")
@@ -508,7 +514,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
         with mock.patch("services.protocol.openai_v1_chat_complete.run_web_search", return_value=search_result) as search:
             response = openai_v1_chat_complete.handle(body)
 
-        search.assert_called_once_with("search options")
+        search.assert_called_once_with("search options", "auto")
         self.assertIn("Options search answer.", response["choices"][0]["message"]["content"])
 
     def test_chat_completions_search_model_triggers_search(self) -> None:
@@ -524,7 +530,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
         with mock.patch("services.protocol.openai_v1_chat_complete.run_web_search", return_value=search_result) as search:
             response = openai_v1_chat_complete.handle(body)
 
-        search.assert_called_once_with("search model")
+        search.assert_called_once_with("search model", "gpt-5-search-api-2026-06-01")
         self.assertEqual(response["model"], "gpt-5-search-api-2026-06-01")
         self.assertIn("Search model answer.", response["choices"][0]["message"]["content"])
 
