@@ -25,8 +25,10 @@ from services.protocol.web_search_tool import (
     WEB_SEARCH_TOOL_TYPES,
     has_unsupported_tools,
     is_web_search_chat_request,
+    normalized_sources,
     run_web_search,
-    search_query_from_messages,
+    search_prompt_from_messages,
+    stream_web_search,
     text_with_url_citations,
 )
 from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
@@ -199,26 +201,47 @@ def chat_completion_annotations(annotations: list[dict[str, Any]]) -> list[dict[
 
 
 def web_search_chat_response(messages: list[dict[str, Any]], model: str) -> dict[str, Any]:
-    query = search_query_from_messages(messages)
+    query = search_prompt_from_messages(messages)
     if not query:
         raise HTTPException(status_code=400, detail={"error": "messages or prompt is required for web search"})
-    text, annotations = text_with_url_citations(run_web_search(query))
-    return completion_response(
+    result = run_web_search(query, model)
+    text, annotations = text_with_url_citations(result)
+    response = completion_response(
         model,
         text,
         messages=messages,
         annotations=chat_completion_annotations(annotations),
     )
+    response["search_sources"] = normalized_sources(result)
+    return response
 
 
 def stream_web_search_chat_completion(messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
-    query = search_query_from_messages(messages)
+    """Forward the search answer as ChatGPT writes it; the source list follows the answer."""
+    query = search_prompt_from_messages(messages)
     if not query:
         raise HTTPException(status_code=400, detail={"error": "messages or prompt is required for web search"})
-    text, _annotations = text_with_url_citations(run_web_search(query))
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    yield completion_chunk(model, {"role": "assistant", "content": text}, None, completion_id, created)
+    sent = ""
+    result: dict[str, Any] = {}
+    for event in stream_web_search(query, model):
+        if event["type"] == "done":
+            result = event["result"]
+            continue
+        delta = {"content": event["text"]} if sent else {"role": "assistant", "content": event["text"]}
+        sent += event["text"]
+        yield completion_chunk(model, delta, None, completion_id, created)
+    text, annotations = text_with_url_citations(result)
+    tail = text[len(sent):] if text.startswith(sent) else ""
+    final_delta: dict[str, Any] = {} if sent else {"role": "assistant"}
+    if tail:
+        final_delta["content"] = tail
+    if annotations:
+        final_delta["annotations"] = chat_completion_annotations(annotations)
+    chunk = completion_chunk(model, final_delta, None, completion_id, created)
+    chunk["search_sources"] = normalized_sources(result)
+    yield chunk
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 

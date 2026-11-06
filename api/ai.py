@@ -61,6 +61,7 @@ class AnthropicMessageRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
+    model: str | None = None
 
 
 class EditableFileTaskRequest(BaseModel):
@@ -182,11 +183,11 @@ def create_router() -> APIRouter:
     @router.post("/v1/search")
     async def search(body: SearchRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        search_model = openai_search.current_model()
+        search_model = await run_in_threadpool(openai_search.search_model_for, body.model)
         require_model_allowed(identity, search_model)
         call = LoggedCall(identity, "/v1/search", search_model, "搜索", request_text=body.prompt)
         await filter_or_log(call, body.prompt)
-        return await call.run(openai_search.handle, body.model_dump(mode="python"))
+        return await call.run(openai_search.handle, {**body.model_dump(mode="python"), "model": search_model})
 
     @router.get("/v1/editable-file-tasks")
     async def list_editable_file_tasks(ids: str = "", authorization: str | None = Header(default=None)):

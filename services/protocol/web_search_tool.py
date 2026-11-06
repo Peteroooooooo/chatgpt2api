@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import re
+from collections.abc import Iterator
 from typing import Any
+
+from utils.answer_markup import clean_private_annotations
 
 WEB_SEARCH_TOOL_TYPES = {"web_search", "web_search_preview", "web_search_preview_2025_03_11"}
 SEARCH_CHAT_MODEL_PREFIXES = (
@@ -70,36 +72,22 @@ def search_query_from_messages(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _readable_annotation_part(parts: list[str]) -> str:
-    for part in parts:
-        value = part.strip()
-        lower = value.lower()
-        if value and not (
-            lower.startswith(("turn", "source", "sources"))
-            or re.fullmatch(r"\d+", value)
-        ):
-            return value
-    return ""
+def search_prompt_from_messages(messages: list[dict[str, Any]]) -> str:
+    """The last user message, after any system / developer instructions (answer style, focus)."""
+    query = search_query_from_messages(messages)
+    if not query:
+        return ""
+    instructions = [
+        text
+        for message in messages
+        if str(message.get("role") or "").strip().lower() in {"system", "developer"}
+        and (text := message_text(message.get("content")))
+    ]
+    return "\n\n".join([*instructions, query])
 
 
 def clean_search_text(text: str) -> str:
-    def replace_annotation(match: re.Match[str]) -> str:
-        parts = [part.strip() for part in match.group(1).split("\ue202")]
-        kind = (parts[0] if parts else "").lower()
-        data = parts[1:]
-        if kind == "url":
-            label = data[0] if data else ""
-            url = data[1] if len(data) > 1 else ""
-            if label and url.startswith(("http://", "https://")):
-                return f"{label} ({url})"
-            return label or url
-        if kind == "cite":
-            return _readable_annotation_part(data)
-        return _readable_annotation_part(data)
-
-    text = re.sub(r"\ue200([^\ue201]*)\ue201", replace_annotation, text)
-    text = re.sub(r"\ue200[^\ue201]*$", "", text)
-    return re.sub(r"\s+([.,;:!?])", r"\1", text).strip()
+    return clean_private_annotations(text)
 
 
 def normalized_sources(result: dict[str, Any]) -> list[dict[str, str]]:
@@ -150,9 +138,16 @@ def text_with_url_citations(result: dict[str, Any]) -> tuple[str, list[dict[str,
     return text.strip(), annotations
 
 
-def run_web_search(query: str) -> dict[str, Any]:
-    """Search with the configured search model on an account allowed to run it."""
-    from services.protocol.openai_search import search_with_account
+def run_web_search(query: str, model: object = None) -> dict[str, Any]:
+    """Search to the end with the request's model (or the configured search model)."""
+    from services.protocol.openai_search import search_model_for, search_with_account
 
-    result, _token = search_with_account(query)
+    result, _token = search_with_account(query, search_model_for(model))
     return result
+
+
+def stream_web_search(query: str, model: object = None) -> Iterator[dict[str, Any]]:
+    """Search events as the answer is written: {"type": "delta", "text"}, then {"type": "done", "result"}."""
+    from services.protocol.openai_search import search_events, search_model_for
+
+    return search_events(query, search_model_for(model))

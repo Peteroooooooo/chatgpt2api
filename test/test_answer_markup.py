@@ -57,6 +57,30 @@ class CleanAnswerMarkupTests(unittest.TestCase):
         self.assertEqual(clean_answer_markup("no tags\n\n\n\nhere"), "no tags\n\n\n\nhere")
         self.assertEqual(clean_answer_markup(""), "")
 
+    def test_link_becomes_markdown_link_or_its_title(self) -> None:
+        text = 'See <Link ref="turn1search2" title="Vite on npm"/> and <Link ref="turn1search9" title="Docs"/>.'
+        urls = {"turn1search2": "https://www.npmjs.com/package/vite"}
+
+        self.assertEqual(
+            clean_answer_markup(text, lambda ref: urls.get(ref, "")),
+            "See [Vite on npm](https://www.npmjs.com/package/vite) and Docs.",
+        )
+
+    def test_widgets_and_dividers_are_removed(self) -> None:
+        text = 'A\n<AsyncImage query="logo" aspectRatio="1:1" maxWidth="104px"/>\n<divider color="subtle"/>\nB <SuggestAutomation label="Track" emoji="x"/>'
+
+        self.assertEqual(clean_answer_markup(text), "A\n\nB")
+
+    def test_generic_type_names_are_kept(self) -> None:
+        text = "Use List<String> or Map<K, V> here, and <Foo/> stays."
+
+        self.assertEqual(clean_answer_markup(text), text)
+
+    def test_text_inside_layout_loses_layout_indent(self) -> None:
+        text = '<box gap={1}>\n    **Title**\n    - item\n</box>\n    indented code stays'
+
+        self.assertEqual(clean_answer_markup(text), "\n**Title**\n- item\n\n    indented code stays")
+
 
 class SearchAnswerMarkupTests(unittest.TestCase):
     def test_search_answer_is_cleaned(self) -> None:

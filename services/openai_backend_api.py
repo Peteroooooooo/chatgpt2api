@@ -23,6 +23,7 @@ from PIL import Image
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
+from services.search_stream import SearchAnswerStream
 from utils import browser_profile
 from utils.answer_markup import clean_answer_markup
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
@@ -1862,12 +1863,66 @@ class OpenAIBackendAPI:
 
     def search(self, prompt: str, model: str = SEARCH_MODEL, timeout_secs: float = SEARCH_TIMEOUT_SECS,
                poll_interval_secs: float = SEARCH_POLL_INTERVAL_SECS) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for event in self.search_events(prompt, model, timeout_secs, poll_interval_secs):
+            if event["type"] == "done":
+                result = event["result"]
+        return result
+
+    def search_events(self, prompt: str, model: str = SEARCH_MODEL, timeout_secs: float = SEARCH_TIMEOUT_SECS,
+                      poll_interval_secs: float = SEARCH_POLL_INTERVAL_SECS) -> Iterator[Dict[str, Any]]:
+        """Run a forced-search conversation and yield the answer as it is written.
+
+        Yields {"type": "delta", "text": ...} for answer text, then one
+        {"type": "done", "result": {...}} with the full answer and its sources.
+        """
         if not self.access_token:
             raise RuntimeError("access_token is required for search")
         conduit_token = self._prepare_search_conversation(prompt, model)
         self._bootstrap()
-        conversation_id = self._run_search_conversation(prompt, conduit_token, model)
-        return self._wait_search_result(conversation_id, timeout_secs, poll_interval_secs)
+        stream = SearchAnswerStream()
+        response = self._open_search_conversation(prompt, conduit_token, model)
+        try:
+            for payload in iter_sse_payloads(response):
+                delta = stream.feed(payload)
+                if delta:
+                    yield {"type": "delta", "text": delta}
+                if stream.done:
+                    break
+        finally:
+            response.close()
+        delta = stream.finish()
+        if delta:
+            yield {"type": "delta", "text": delta}
+        if not stream.conversation_id:
+            raise RuntimeError("conversation_id not found in stream")
+        if stream.mismatch:
+            logger.warning({"event": "search_stream_text_mismatch", "conversation_id": stream.conversation_id})
+        yield {"type": "done", "result": self._finish_search(stream, timeout_secs, poll_interval_secs)}
+
+    def _finish_search(self, stream: SearchAnswerStream, timeout_secs: float, poll_interval_secs: float) -> Dict[str, Any]:
+        """Final result: the streamed answer, with sources from one read of the finished conversation."""
+        conversation_id = stream.conversation_id
+        if not stream.answer:
+            # Nothing usable came through the stream: fall back to polling the conversation.
+            return self._wait_search_result(conversation_id, timeout_secs, poll_interval_secs)
+        try:
+            stored = self._extract_search_result(conversation_id, self._get_search_conversation(conversation_id))
+        except Exception as exc:  # noqa: BLE001 - the answer is already complete without it
+            logger.warning({"event": "search_result_fetch_failed", "conversation_id": conversation_id, "error": str(exc)[:200]})
+            stored = {}
+        sources = stream.sources()
+        for source in stored.get("sources") or []:
+            if all(item["url"] != source["url"] for item in sources):
+                sources.append(source)
+        return {
+            "conversation_id": conversation_id,
+            "status": stored.get("status") or "finished_successfully",
+            "answer": stream.answer,
+            "sources": sources,
+            "assistant_message_id": stored.get("assistant_message_id") or "",
+            "create_time": stored.get("create_time") or 0.0,
+        }
 
     def _prepare_search_conversation(self, prompt: str, model: str) -> str:
         path = "/backend-api/f/conversation/prepare"
@@ -1897,7 +1952,7 @@ class OpenAIBackendAPI:
             raise RuntimeError("missing conduit_token")
         return token
 
-    def _run_search_conversation(self, prompt: str, conduit_token: str, model: str) -> str:
+    def _open_search_conversation(self, prompt: str, conduit_token: str, model: str) -> requests.Response:
         requirements = self._get_chat_requirements()
         path = "/backend-api/f/conversation"
         response = self.session.post(
@@ -1938,17 +1993,7 @@ class OpenAIBackendAPI:
             stream=True,
         )
         ensure_ok(response, path)
-        conversation_id = ""
-        try:
-            for payload in iter_sse_payloads(response):
-                conversation_id = conversation_id or self._find_search_value(payload, "conversation_id")
-                if payload == "[DONE]":
-                    break
-        finally:
-            response.close()
-        if not conversation_id:
-            raise RuntimeError("conversation_id not found in stream")
-        return conversation_id
+        return response
 
     def _wait_search_result(self, conversation_id: str, timeout_secs: float, poll_interval_secs: float) -> Dict[str, Any]:
         deadline = time.time() + timeout_secs
@@ -1998,11 +2043,13 @@ class OpenAIBackendAPI:
         else:
             # A long reply can be split into several "final" segments with tool
             # calls between them; the answer is all of them in chain order.
-            segments = [item for item in chain if self._is_search_final_message(item) and self._search_message_text(item)]
+            finals = [item for item in chain if self._is_search_final_message(item) and self._search_message_text(item)]
+            # A merged answer message repeats the hidden fragments it was built from.
+            segments = [item for item in finals if not self._is_hidden_message(item)] or finals
             message = segments[-1] if segments else (chain[-1] if chain else {})
             tip = chain[-1] if chain else {}
             # Later non-final messages mean the model is still working on the reply.
-            status = self._search_message_status(message) if tip is message else ""
+            status = self._search_message_status(tip) if any(tip is item for item in finals) else ""
         answer = clean_answer_markup("\n\n".join(self._search_message_text(item) for item in segments)).strip()
         sources: list[Dict[str, str]] = []
         for segment in segments:
@@ -2042,6 +2089,11 @@ class OpenAIBackendAPI:
             node_id = str(node.get("parent") or "")
         chain.reverse()
         return chain
+
+    @staticmethod
+    def _is_hidden_message(message: Dict[str, Any]) -> bool:
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        return metadata.get("is_visually_hidden_from_conversation") is True
 
     @staticmethod
     def _is_search_final_message(message: Dict[str, Any]) -> bool:

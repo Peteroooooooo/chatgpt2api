@@ -17,7 +17,7 @@ from services.account_service import AccountService
 from services.auth_service import AuthService
 from services.log_service import LoggedCall
 from services.model_rules import ModelAccessTracker, ModelRulesStore, ModelUnavailableError
-from services.model_service import ModelCatalogService
+from services.model_service import ModelCatalogService, ModelRoute
 from services.protocol import openai_search
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import UpstreamHTTPError
@@ -369,7 +369,7 @@ class SearchModelSettingTests(unittest.TestCase):
 
     def test_search_uses_configured_model_and_an_allowed_account(self) -> None:
         backend = mock.Mock()
-        backend.search.return_value = {"answer": "ok"}
+        backend.search_events.return_value = iter([{"type": "done", "result": {"answer": "ok"}}])
         with (
             mock.patch.object(openai_search, "model_rules_store", self.store),
             mock.patch.object(openai_search.account_service, "get_text_access_token", return_value="free-1") as selector,
@@ -380,9 +380,57 @@ class SearchModelSettingTests(unittest.TestCase):
             self.store.update_features({"search_model": "gpt-6-mini"})
             result = openai_search.handle({"prompt": "news"})
 
-        selector.assert_called_once_with(model="gpt-6-mini", internal=True)
-        backend.search.assert_called_once_with("news", model="gpt-6-mini")
+        self.assertEqual(selector.call_count, 1)
+        self.assertEqual(selector.call_args.kwargs["model"], "gpt-6-mini")
+        self.assertTrue(selector.call_args.kwargs["internal"])
+        backend.search_events.assert_called_once_with("news", model="gpt-6-mini")
         self.assertEqual(result["_account_email"], "a@b.c")
+
+    def test_search_retries_once_on_another_account_before_any_text(self) -> None:
+        failing, working = mock.Mock(), mock.Mock()
+        failing.search_events.side_effect = RuntimeError("upstream 500")
+        working.search_events.return_value = iter([
+            {"type": "delta", "text": "answer"},
+            {"type": "done", "result": {"answer": "answer"}},
+        ])
+        with (
+            mock.patch.object(openai_search, "model_rules_store", self.store),
+            mock.patch.object(openai_search.account_service, "get_text_access_token", side_effect=["t1", "t2"]),
+            mock.patch.object(openai_search.account_service, "mark_text_used"),
+            mock.patch.object(openai_search, "OpenAIBackendAPI", side_effect=[failing, working]),
+        ):
+            events = list(openai_search.search_events("news", "gpt-6-mini"))
+
+        self.assertEqual([event["type"] for event in events], ["delta", "done"])
+        self.assertEqual(events[-1]["token"], "t2")
+
+    def test_search_gives_up_when_the_pool_returns_the_same_account(self) -> None:
+        failing = mock.Mock()
+        failing.search_events.side_effect = RuntimeError("upstream 500")
+        with (
+            mock.patch.object(openai_search, "model_rules_store", self.store),
+            mock.patch.object(openai_search.account_service, "get_text_access_token", return_value="t1"),
+            mock.patch.object(openai_search, "OpenAIBackendAPI", return_value=failing),
+            self.assertRaisesRegex(RuntimeError, "upstream 500"),
+        ):
+            list(openai_search.search_events("news", "gpt-6-mini"))
+        self.assertEqual(failing.search_events.call_count, 1)
+
+    def test_search_model_follows_the_request_when_the_pool_offers_it(self) -> None:
+        routes = {
+            "gpt-6-mini": ModelRoute(account_types=frozenset({"free"})),
+            "gpt-6-thinking": ModelRoute(account_types=frozenset({"Plus"}), exposed=False),
+            "gpt-4o-search-preview": ModelRoute(account_types=frozenset(), known=False),
+        }
+        with (
+            mock.patch.object(openai_search, "model_rules_store", self.store),
+            mock.patch("services.model_service.model_catalog_service.route_for_model", side_effect=lambda m: routes[m]),
+        ):
+            self.store.update_features({"search_model": "auto"})
+            self.assertEqual(openai_search.search_model_for("gpt-6-mini"), "gpt-6-mini")
+            self.assertEqual(openai_search.search_model_for("gpt-6-thinking"), "auto")
+            self.assertEqual(openai_search.search_model_for("gpt-4o-search-preview"), "auto")
+            self.assertEqual(openai_search.search_model_for(""), "auto")
 
     def test_search_without_logged_in_account_gives_clear_error(self) -> None:
         with (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import time
 import uuid
 from typing import Any, Iterable, Iterator
@@ -24,8 +25,9 @@ from services.protocol.web_search_tool import (
     has_unsupported_tools,
     has_web_search_tool,
     normalized_sources,
-    run_web_search,
+    search_prompt_from_messages,
     search_query_from_messages,
+    stream_web_search,
     text_with_url_citations,
 )
 from utils.helper import extract_image_from_message_content, extract_response_prompt, has_response_image_generation_tool
@@ -327,27 +329,39 @@ def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, An
     query = search_query_from_messages(messages) or extract_response_prompt(body.get("input"))
     if not query:
         raise HTTPException(status_code=400, detail={"error": "input text is required for web_search"})
+    prompt = search_prompt_from_messages(messages) or query
 
     response_id = f"resp_{uuid.uuid4().hex}"
     search_id = f"ws_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
+    events = stream_web_search(prompt, model)
+    first = next(events)
     yield response_created(response_id, model, created)
 
     searching_item = web_search_call_item(query, search_id, "in_progress")
     yield {"type": "response.output_item.added", "output_index": 0, "item": searching_item}
     yield {"type": "response.web_search_call.in_progress", "output_index": 0, "item_id": search_id}
     yield {"type": "response.web_search_call.searching", "output_index": 0, "item_id": search_id}
-    result = run_web_search(query)
-    search_item = web_search_call_item(query, search_id, "completed", normalized_sources(result))
     yield {"type": "response.web_search_call.completed", "output_index": 0, "item_id": search_id}
-    yield {"type": "response.output_item.done", "output_index": 0, "item": search_item}
+    yield {"type": "response.output_item.done", "output_index": 0, "item": web_search_call_item(query, search_id, "completed")}
+    yield {"type": "response.output_item.added", "output_index": 1, "item": text_output_item("", item_id, "in_progress")}
+
+    sent = ""
+    result: dict[str, Any] = {}
+    for event in itertools.chain([first], events):
+        if event["type"] == "done":
+            result = event["result"]
+            continue
+        sent += event["text"]
+        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 1, "content_index": 0, "delta": event["text"]}
 
     text, annotations = text_with_url_citations(result)
-    message_item = text_output_item("", item_id, "in_progress", annotations)
-    yield {"type": "response.output_item.added", "output_index": 1, "item": message_item}
-    if text:
-        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 1, "content_index": 0, "delta": text}
+    tail = text[len(sent):] if text.startswith(sent) else ""
+    if tail:
+        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 1, "content_index": 0, "delta": tail}
+    text = sent + tail
+    search_item = web_search_call_item(query, search_id, "completed", normalized_sources(result))
     yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 1, "content_index": 0, "text": text}
     message_item = text_output_item(text, item_id, "completed", annotations)
     yield {"type": "response.output_item.done", "output_index": 1, "item": message_item}
