@@ -355,8 +355,8 @@ class SearchModelSettingTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.store = ModelRulesStore(Path(self.temp_dir.name) / "model_rules.json")
 
-    def test_default_keeps_gpt_5_5_and_setting_persists(self) -> None:
-        self.assertEqual(self.store.feature_model("search_model"), "gpt-5-5")
+    def test_default_is_auto_and_setting_persists(self) -> None:
+        self.assertEqual(self.store.feature_model("search_model"), "auto")
         self.assertEqual(self.store.feature_model("real_chat_model"), "auto")
         self.assertEqual(self.store.feature_model("daily_chat_model"), "auto")
 
@@ -465,8 +465,8 @@ class ModelsApiTests(PoolFixture):
         self.assertEqual(len(types["Plus"]["models"]), 21)
         self.assertEqual(data["anonymous"]["models"], sorted(ANON_MODELS))
         self.assertEqual(data["summary"], {"exposed": 12, "hidden": 12, "no_account": 0})
-        self.assertEqual(data["features"]["search_model"], "gpt-5-5")
-        self.assertIn("gpt-5-5", data["key_model_options"])
+        self.assertEqual(data["features"]["search_model"], "auto")
+        self.assertIn("auto", data["key_model_options"])
         self.assertIsNotNone(data["refreshed_at"])
 
     def test_put_rules_and_features(self) -> None:

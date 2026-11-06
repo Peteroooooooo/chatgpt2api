@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from services.openai_backend_api import OpenAIBackendAPI
-from utils.answer_markup import clean_answer_markup
+from utils.answer_markup import clean_answer_markup, stable_length
 
 
 class CleanAnswerMarkupTests(unittest.TestCase):
@@ -80,6 +80,49 @@ class CleanAnswerMarkupTests(unittest.TestCase):
         text = '<box gap={1}>\n    **Title**\n    - item\n</box>\n    indented code stays'
 
         self.assertEqual(clean_answer_markup(text), "\n**Title**\n- item\n\n    indented code stays")
+
+    def test_feedback_survey_widget_is_dropped(self) -> None:
+        text = (
+            "Python 3.15.2 is current.\n\n"
+            '{@body const goal = "python"}\n'
+            '{@body const [q1,sq1] = DIL.useState("")}\n'
+            "{#if submitted}\n  Thanks.\n{:else}\n"
+            "Q1. How satisfied are you with <bold>{goal}</bold>?\n"
+            '<radio-group direction="col" value={q1} onChange={sq1}>\n<radio value="Very">Very</radio>\n</radio-group>\n'
+            '{#each ["A","B"] as option}\n<checkbox shape="square" checked={q2.includes(option)} onChange={v => sq2(v)}>{option}</checkbox>\n{/each}\n'
+            '<textarea value={detail} onChange={sd} rows={2}/>\n'
+            "<button block disabled={!q1} onClick={() => ss(true)}>Submit</button>\n"
+            "{/if}\n\nAfter."
+        )
+
+        self.assertEqual(clean_answer_markup(text), "Python 3.15.2 is current.\n\nAfter.")
+
+    def test_follow_up_question_widget_is_dropped(self) -> None:
+        text = (
+            "Pick one:\n\n"
+            '{@body const [p,setP] = DIL.useState("personal")}\n'
+            '<box border padding={3}>\n  **1. Usage**\n  <radio-group value={p} onChange={setP}>\n'
+            '    <radio value="personal">Personal</radio>\n  </radio-group>\n'
+            '  <button block onClick={()=>GenUI.issueNewTurn("Narrow it down: "+p)}>Go</button>\n</box>\nEnd.'
+        )
+
+        self.assertEqual(clean_answer_markup(text), "Pick one:\n\nEnd.")
+
+    def test_drawings_icons_and_grids_are_removed(self) -> None:
+        text = (
+            '<grid columns={2} gap={2}>\n<grid-item>\n**Host**\n</grid-item>\n</grid>\n'
+            '<icon name="arrow-down" size="lg"/>\n'
+            '<svg viewBox="0 0 10 10"><rect x="1"/><text x="2">Relay</text></svg>\n'
+            "<caption>Architecture</caption>"
+        )
+
+        self.assertEqual(clean_answer_markup(text), "\n\n**Host**\n\nArchitecture")
+
+    def test_unfinished_widget_block_hides_the_rest(self) -> None:
+        self.assertEqual(clean_answer_markup('Text\n{@body const [a,b] = DIL.useState(""'), "Text\n")
+        self.assertEqual(clean_answer_markup('Text\n{@body const x = 1}\n{#if x}\nQ1'), "Text\n")
+        self.assertEqual(stable_length("Text\n{@bo"), len("Text\n"))
+        self.assertEqual(stable_length("Text a<"), len("Text a"))
 
 
 class SearchAnswerMarkupTests(unittest.TestCase):
