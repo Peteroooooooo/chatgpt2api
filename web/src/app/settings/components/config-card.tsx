@@ -157,7 +157,7 @@ export function ConfigCard() {
               placeholder="gpt-5-5"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">gpt-image-2 发起图片请求时使用的上游模型名称，默认 gpt-5-5。</p>
+            <p className="text-xs text-stone-500">gpt-image-2 发起图片请求时使用的上游模型名称。ChatGPT 模型列表里已经没有这个名字时，自动改用 auto。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">默认思考强度</label>

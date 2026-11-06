@@ -310,6 +310,21 @@ class ModelCatalogService:
         with self._lock:
             return self._route_locked(model)
 
+    def set_default_policy(self, policy: str) -> None:
+        """Switch the policy and store the recomputed defaults for every listed model at once."""
+        groups = self._active_accounts_by_type()
+        with self._lock:
+            self._rules.set_default_policy(policy)
+            self._store_default_rules_locked(groups)
+
+    def lists_model(self, model: str) -> bool | None:
+        """Whether any account type or anonymous lists the model; None when nothing could be fetched."""
+        self._ensure_catalog()
+        with self._lock:
+            if not self._anonymous_models and not self._models_by_account_type:
+                return None
+            return str(model or "").strip() in self._all_model_ids_locked()
+
     def resolve_route(self, model: str, *, internal: bool = False) -> ModelRoute:
         """Route for a text request, or ModelUnavailableError with a reason for the caller.
 

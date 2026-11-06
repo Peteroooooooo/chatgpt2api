@@ -35,13 +35,16 @@ def _catalog(force: bool = False) -> dict[str, Any]:
     view["feature_options"] = sorted({*known, *FEATURE_DEFAULTS.values(), *features.values()})
     # What a key may be limited to: every model /v1/models offers, plus the search model.
     view["key_model_options"] = list(dict.fromkeys([*public_ids, features["search_model"]]))
+    # Image models are added by /v1/models itself, outside the rules table.
+    known_ids = set(known)
+    view["image_models"] = [model_id for model_id in public_ids if model_id not in known_ids]
     return view
 
 
 def _apply_update(body: ModelRulesUpdateRequest) -> dict[str, Any]:
     rules = model_catalog_service.rules
     if body.default_policy is not None:
-        rules.set_default_policy(body.default_policy)
+        model_catalog_service.set_default_policy(body.default_policy)
     if body.models:
         shown = {item["id"]: item for item in model_catalog_service.catalog_view()["models"]}
         known = set(shown) | set(rules.all_rules())

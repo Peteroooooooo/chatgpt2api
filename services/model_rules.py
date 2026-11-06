@@ -33,6 +33,7 @@ RULES_FILE = DATA_DIR / "model_rules.json"
 ACCESS_FILE = DATA_DIR / "model_access.json"
 
 # free_exposed: exposed when Free accounts (or anonymous) have it; Plus/Team/Pro-only models start hidden.
+# all_exposed: every upstream model starts exposed, internal hidden-tagged ones included.
 DEFAULT_POLICIES = ("free_exposed", "all_exposed", "all_hidden")
 DEFAULT_POLICY = "free_exposed"
 # Normalized account type names, as AccountService._normalize_account_type returns them.
@@ -165,10 +166,10 @@ class ModelRulesStore:
         tags: Iterable[str] = (),
     ) -> dict[str, Any]:
         types = set(available_types)
-        if HIDDEN_TAG in set(tags):
-            exposed = False
-        elif self._default_policy == "all_exposed":
+        if self._default_policy == "all_exposed":
             exposed = True
+        elif HIDDEN_TAG in set(tags):
+            exposed = False
         elif self._default_policy == "all_hidden":
             exposed = False
         else:
@@ -240,10 +241,17 @@ class ModelRulesStore:
             self._save_locked()
 
     def set_default_policy(self, policy: str) -> None:
+        """Switch the policy. Rules the admin never touched are dropped, so the catalog
+        recomputes them under the new policy; admin rules stay."""
         if policy not in DEFAULT_POLICIES:
             raise ValueError(f"default_policy 只能是 {', '.join(DEFAULT_POLICIES)}")
         with self._lock:
+            changed = policy != self._default_policy
             self._default_policy = policy
+            if changed:
+                self._models = {
+                    model_id: rule for model_id, rule in self._models.items() if rule.get("source") == "admin"
+                }
             self._save_locked()
 
     # ── built-in feature models ──────────────────────────────
