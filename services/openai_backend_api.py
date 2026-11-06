@@ -72,6 +72,8 @@ DEFAULT_CLIENT_VERSION = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
 DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+# Newest first; an older name is tried only when the upstream rejects the newer one.
+CODEX_IMAGE_TOOL_MODELS = ("gpt-image-2.6-sunburst", "gpt-image-2")
 CODEX_RESPONSES_MODEL = "gpt-5.5"
 SEARCH_MODEL = "auto"
 SEARCH_TIMEOUT_SECS = 300.0
@@ -838,6 +840,29 @@ class OpenAIBackendAPI:
         if not self.access_token:
             raise RuntimeError("access_token is required for codex image endpoints")
         self._ensure_codex_source_account()
+        for index, tool_model in enumerate(CODEX_IMAGE_TOOL_MODELS):
+            try:
+                yield from self._codex_image_request(prompt, images, size, quality, tool_model)
+                return
+            except UpstreamHTTPError as error:
+                rejected = error.status_code in {400, 404} and index + 1 < len(CODEX_IMAGE_TOOL_MODELS)
+                if not rejected:
+                    raise
+                logger.info({
+                    "event": "codex_image_model_fallback",
+                    "rejected": tool_model,
+                    "next": CODEX_IMAGE_TOOL_MODELS[index + 1],
+                    "status": error.status_code,
+                })
+
+    def _codex_image_request(
+            self,
+            prompt: str,
+            images: list[str] | None,
+            size: str | None,
+            quality: str,
+            tool_model: str,
+    ) -> Iterator[Dict[str, Any]]:
         path = "/backend-api/codex/responses"
         payload = {
             "model": CODEX_RESPONSES_MODEL,
@@ -846,7 +871,7 @@ class OpenAIBackendAPI:
             "input": self._codex_image_input(prompt, images or []),
             "tools": [{
                 "type": "image_generation",
-                "model": "gpt-image-2",
+                "model": tool_model,
                 "action": "edit" if images else "generate",
                 "size": str(size or "1024x1024"),
                 "quality": str(quality or "auto"),
