@@ -420,6 +420,32 @@ class ConfigStore:
             return 3
 
     @property
+    def image_account_wait_timeout_secs(self) -> float:
+        """How long an image request waits for a free slot when every account is at
+        image_account_concurrency before it fails with a busy error."""
+        try:
+            return max(0.0, float(self.data.get("image_account_wait_timeout_secs", 90)))
+        except (TypeError, ValueError):
+            return 90.0
+
+    @property
+    def image_rate_limit_cooldown_secs(self) -> int:
+        """How long an account stays out of image rotation after an upstream limit answer
+        that gave no reset time."""
+        try:
+            return max(30, int(self.data.get("image_rate_limit_cooldown_secs", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    @property
+    def image_rate_limit_max_switches(self) -> int:
+        """How many times one image request may move to another account after limit answers."""
+        try:
+            return max(0, int(self.data.get("image_rate_limit_max_switches", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    @property
     def image_parallel_generation(self) -> bool:
         value = self.data.get("image_parallel_generation", True)
         if isinstance(value, str):
@@ -565,6 +591,9 @@ class ConfigStore:
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_account_wait_timeout_secs"] = self.image_account_wait_timeout_secs
+        data["image_rate_limit_cooldown_secs"] = self.image_rate_limit_cooldown_secs
+        data["image_rate_limit_max_switches"] = self.image_rate_limit_max_switches
         data["image_parallel_generation"] = self.image_parallel_generation
         data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
         data["image_remove_conversation_always"] = self.image_remove_conversation_always

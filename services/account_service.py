@@ -32,6 +32,11 @@ def _url_path(url: str) -> str:
 
     return urlparse(str(url)).path.rstrip("/")
 
+
+class ImageAccountsBusyError(RuntimeError):
+    """Every eligible image account stayed at image_account_concurrency for the whole wait."""
+
+
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
 
@@ -62,6 +67,9 @@ class AccountService:
         self._index = 0
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
+        # Image picks: sequence number of each account's last pick, for round-robin among equally loaded accounts.
+        self._image_last_pick: dict[str, int] = {}
+        self._image_pick_seq = 0
         self._token_aliases: dict[str, str] = {}
         self._real_chat_test_active_tokens: set[str] = set()
         self._cumulative_total = self._load_cumulative_total()
@@ -138,12 +146,30 @@ class AccountService:
         self.storage.save_accounts(list(self._accounts.values()))
 
     @staticmethod
+    def _image_cooldown_until(account: dict) -> datetime | None:
+        return AccountService._parse_time(account.get("image_limited_until"))
+
+    @staticmethod
     def _is_image_account_available(account: dict) -> bool:
         if not isinstance(account, dict):
             return False
-        if account.get("status") in {"禁用", "限流", "异常"}:
+        status = account.get("status")
+        if status in {"禁用", "异常"}:
             return False
+        if status == "限流":
+            # An account put on an image cooldown after an upstream limit comes back as a
+            # candidate once the cooldown is over; the live quota check before use decides.
+            until = AccountService._image_cooldown_until(account)
+            if until is None or until > datetime.now(timezone.utc):
+                return False
         return int(account.get("quota") or 0) > 0
+
+    @staticmethod
+    def _drop_image_cooldown_unless_limited(account: dict) -> dict:
+        if account.get("status") != "限流":
+            account.pop("image_limited_until", None)
+            account.pop("image_limited_reason", None)
+        return account
 
     @classmethod
     def _account_matches_plan_type(cls, account: dict, plan_type: str | None = None) -> bool:
@@ -486,6 +512,8 @@ class AccountService:
                 old_inflight = int(self._image_inflight.pop(old_token, 0))
                 if old_inflight:
                     self._image_inflight[new_token] = int(self._image_inflight.get(new_token, 0)) + old_inflight
+                if old_token in self._image_last_pick:
+                    self._image_last_pick[new_token] = self._image_last_pick.pop(old_token)
             self._accounts[new_token] = account
             self._save_accounts()
             self._image_slot_condition.notify_all()
@@ -1235,41 +1263,58 @@ class AccountService:
                and token not in excluded
         ]
 
-    def _list_available_candidate_tokens(
-            self,
-            excluded_tokens: set[str] | None = None,
-            plan_type: str | None = None,
-            source_type: str | None = None,
-            plan_types: set[str] | tuple[str, ...] | None = None,
-    ) -> list[str]:
-        max_concurrency = max(1, int(config.image_account_concurrency or 1))
-        return [
-            token
-            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
-            if int(self._image_inflight.get(token, 0)) < max_concurrency
-        ]
-
     def _acquire_next_candidate_token(
             self,
             excluded_tokens: set[str] | None = None,
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            deadline: float | None = None,
+            avoid_tokens: set[str] | None = None,
     ) -> str:
+        """Take an image slot on the least busy eligible account.
+
+        Order: fewest images in flight first (an account only gets a 2nd job when every
+        eligible account already has one), then accounts not in avoid_tokens (the ones a
+        retry just failed on), then the one picked longest ago (round-robin among ties).
+        image_account_concurrency stays the hard cap per account. When every eligible
+        account is at the cap, waits until `deadline` (time.monotonic()) and then raises
+        ImageAccountsBusyError.
+        """
+        avoid = set(avoid_tokens or set())
+        max_concurrency = max(1, int(config.image_account_concurrency or 1))
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types):
+                ready = self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+                if not ready:
                     raise RuntimeError(
                         f"no available {plan_type or source_type or ''} image quota".replace("  ", " ").strip()
                         if plan_type or source_type else "no available image quota"
                     )
-                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
-                if tokens:
-                    access_token = tokens[self._index % len(tokens)]
-                    self._index += 1
+                free = [token for token in ready if int(self._image_inflight.get(token, 0)) < max_concurrency]
+                if free:
+                    access_token = min(
+                        free,
+                        key=lambda token: (
+                            int(self._image_inflight.get(token, 0)),
+                            token in avoid,
+                            self._image_last_pick.get(token, -1),
+                        ),
+                    )
+                    self._image_pick_seq += 1
+                    self._image_last_pick[access_token] = self._image_pick_seq
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
-                self._image_slot_condition.wait(timeout=1.0)
+                wait_for = 1.0
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ImageAccountsBusyError(
+                            f"all image accounts are busy: each of the {len(ready)} available accounts already has "
+                            f"{max_concurrency} images in progress; please retry shortly"
+                        )
+                    wait_for = min(wait_for, remaining)
+                self._image_slot_condition.wait(timeout=wait_for)
 
     def release_image_slot(self, access_token: str) -> None:
         if not access_token:
@@ -1288,20 +1333,25 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            avoid_tokens: set[str] | None = None,
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
         基于本地缓存做初筛，然后通过 fetch_remote_info 做远程验证（token 有效性、配额等）。
         限制最大尝试次数防止 token rotation 导致无限循环。
+        所有账号都满载时最多等 image_account_wait_timeout_secs 秒，之后抛 ImageAccountsBusyError。
         """
         max_attempts = 20  # 防止无限循环
         attempted_tokens: set[str] = set()
+        deadline = time.monotonic() + float(config.image_account_wait_timeout_secs)
         for _attempt in range(max_attempts):
             access_token = self._acquire_next_candidate_token(
                 excluded_tokens=attempted_tokens,
                 plan_type=plan_type,
                 source_type=source_type,
                 plan_types=plan_types,
+                deadline=deadline,
+                avoid_tokens=avoid_tokens,
             )
             attempted_tokens.add(access_token)
             try:
@@ -1595,6 +1645,7 @@ class AccountService:
             removed = sum(self._accounts.pop(token, None) is not None for token in target_set)
             for token in target_set:
                 self._image_inflight.pop(token, None)
+                self._image_last_pick.pop(token, None)
             self._token_aliases = {
                 old: new
                 for old, new in self._token_aliases.items()
@@ -1621,6 +1672,7 @@ class AccountService:
             account = self._normalize_account({**current, **updates, "access_token": access_token})
             if account is None:
                 return None
+            self._drop_image_cooldown_unless_limited(account)
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
@@ -1719,6 +1771,7 @@ class AccountService:
             account = self._normalize_account(next_item)
             if account is None:
                 return None
+            self._drop_image_cooldown_unless_limited(account)
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
@@ -1728,6 +1781,61 @@ class AccountService:
             self._save_accounts()
             return dict(account)
         return None
+
+    # Longest an upstream "limit reached" answer may keep an account out of image rotation.
+    _IMAGE_COOLDOWN_MAX_SECONDS = 24 * 60 * 60
+
+    def mark_image_rate_limited(
+        self,
+        access_token: str,
+        *,
+        reason: str,
+        restore_at: datetime | None = None,
+        quota_exhausted: bool = False,
+    ) -> dict | None:
+        """Take an account out of image rotation after ChatGPT said it hit a limit.
+
+        Status becomes 限流 until `restore_at` (the upstream reset time when it gave one,
+        otherwise now + image_rate_limit_cooldown_secs; at most 24 h). The account watcher
+        keeps it 限流 until then even if the quota check looks fine; afterwards it is
+        a candidate again and the live check before use decides.
+        """
+        if not access_token:
+            return None
+        now = datetime.now(timezone.utc)
+        until = restore_at if restore_at is not None and restore_at > now else (
+            now + timedelta(seconds=config.image_rate_limit_cooldown_secs)
+        )
+        until = min(until, now + timedelta(seconds=self._IMAGE_COOLDOWN_MAX_SECONDS))
+        updates: dict[str, Any] = {
+            "status": "限流",
+            "restore_at": until.isoformat(),
+            "image_limited_until": until.isoformat(),
+            "image_limited_reason": str(reason or "upstream rate limit")[:200],
+        }
+        if quota_exhausted:
+            updates["quota"] = 0
+        account = self.update_account(access_token, updates, quiet=True)
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "生图被上游限流，暂停使用该账号",
+            {
+                "token": anonymize_token(access_token),
+                "until": until.isoformat(),
+                "reason": updates["image_limited_reason"],
+            },
+        )
+        return account
+
+    def _hold_image_cooldown(self, access_token: str, result: dict | None) -> dict | None:
+        """Keep an image cooldown in force when a quota refresh reports the account as fine."""
+        if not isinstance(result, dict) or result.get("status") != "正常":
+            return result
+        current = self.get_account(access_token) or {}
+        until = self._image_cooldown_until(current)
+        if current.get("status") != "限流" or until is None or until <= datetime.now(timezone.utc):
+            return result
+        return {**result, "status": "限流", "restore_at": current.get("image_limited_until")}
 
     # Phrases the OAuth token endpoint uses when the refresh_token itself is gone.
     _SESSION_ENDED_REFRESH_MARKERS = (
@@ -1802,7 +1910,7 @@ class AccountService:
                     self.remove_invalid_token(active_token, event)
                 raise
         self._record_refresh_success(active_token)
-        return self.update_account(active_token, result)
+        return self.update_account(active_token, self._hold_image_cooldown(active_token, result))
 
     def check_plus_trial_eligibility(self, access_token: str) -> dict[str, Any]:
         """Check and persist a definitive Plus trial eligibility result.

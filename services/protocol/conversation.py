@@ -11,12 +11,20 @@ from typing import Any, Iterable, Iterator
 
 import tiktoken
 
-from services.account_service import account_service
+from services.account_service import ImageAccountsBusyError, account_service
 from services.config import config
+from services.image_rate_limit import (
+    ImageRateLimit,
+    ImageRateLimitedError,
+    rate_limit_from_message,
+    rate_limit_from_sse_event,
+    rate_limit_from_upstream_error,
+)
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
     IMAGE_MODELS,
+    anonymize_token,
     extract_image_from_message_content,
     is_codex_image_model,
     is_supported_image_model,
@@ -880,6 +888,9 @@ def stream_image_outputs(
             continue
         if event.get("type") == "conversation.event":
             raw = event.get("raw")
+            limit = rate_limit_from_sse_event(raw)
+            if limit is not None:
+                raise ImageRateLimitedError(limit)
             raw_type = str(raw.get("type") or "") if isinstance(raw, dict) else ""
             yield ImageOutput(
                 kind="progress",
@@ -904,6 +915,11 @@ def stream_image_outputs(
     })
     if request.progress_callback:
         request.progress_callback("image_stream_resolve_start")
+    if message and not file_ids and not sediment_ids and rate_limit_from_message(message):
+        # "You've hit the ... limit" answer: no image is coming, skip the poll and let the
+        # caller move the request to another account.
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
+        return
     if message and not file_ids and not sediment_ids and last.get("blocked"):
         # 尝试从 /backend-api/tasks/ 获取详细错误信息
         detailed_error = _get_detailed_error_from_tasks(backend, conversation_id)
@@ -957,7 +973,9 @@ def stream_image_outputs(
     detailed_error = ""
     if not file_ids and not sediment_ids and conversation_id:
         detailed_error = _get_detailed_error_from_tasks(backend, conversation_id, timeout_secs=5.0, wait_secs=1.0)
-        if detailed_error and not should_poll_for_image and not is_text_reply:
+        if detailed_error and (
+                (not should_poll_for_image and not is_text_reply) or rate_limit_from_message(detailed_error)
+        ):
             logger.info({
                 "event": "image_task_error_before_poll",
                 "conversation_id": conversation_id,
@@ -1303,6 +1321,60 @@ def stream_codex_image_outputs(
     raise ImageGenerationError("No image result found in response")
 
 
+class _ImageSlot:
+    """The image slot one attempt holds on an account; closed exactly once."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.open = True
+
+    def finish(self, success: bool) -> None:
+        if self.open:
+            self.open = False
+            account_service.mark_image_result(self.token, success)
+
+    def release(self) -> None:
+        if self.open:
+            self.open = False
+            account_service.release_image_slot(self.token)
+
+
+def _switch_after_rate_limit(
+        token: str,
+        account_email: str,
+        limit: ImageRateLimit,
+        switches: int,
+        index: int,
+) -> int:
+    """Put the account on an image cooldown; return the new switch count, or raise once the cap is used."""
+    account_service.mark_image_rate_limited(
+        token,
+        reason=limit.reason,
+        restore_at=limit.restore_at,
+        quota_exhausted=limit.quota_exhausted,
+    )
+    switches += 1
+    max_switches = config.image_rate_limit_max_switches
+    logger.warning({
+        "event": "image_rate_limited_switch_account" if switches <= max_switches else "image_rate_limited_switches_exhausted",
+        "account_email": account_email,
+        "reason": limit.reason[:200],
+        "restore_at": limit.restore_at.isoformat() if limit.restore_at else None,
+        "switch_count": switches,
+        "max_switches": max_switches,
+        "index": index,
+    })
+    if switches > max_switches:
+        raise ImageGenerationError(
+            f"no available image quota: {switches} accounts in a row were rate limited upstream",
+            status_code=429,
+            error_type="insufficient_quota",
+            code="insufficient_quota",
+            account_email=account_email,
+        )
+    return switches
+
+
 def _generate_single_image(
         request: ConversationRequest,
         index: int,
@@ -1326,6 +1398,9 @@ def _generate_single_image(
     tls_retry_count = 0
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
+    rate_limit_switches = 0
+    # Accounts this request already failed on; equally free accounts are tried first on a retry.
+    avoid_tokens: set[str] = set()
     account_email = ""
 
     while True:
@@ -1338,10 +1413,20 @@ def _generate_single_image(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                avoid_tokens=avoid_tokens,
             )
+        except ImageAccountsBusyError as exc:
+            raise ImageGenerationError(
+                str(exc),
+                status_code=503,
+                error_type="server_error",
+                code="image_accounts_busy",
+                account_email=account_email,
+            ) from exc
         except RuntimeError as exc:
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
 
+        slot = _ImageSlot(token)
         emitted_for_token = False
         returned_message = False
         returned_result = False
@@ -1367,6 +1452,10 @@ def _generate_single_image(
                     last_conversation_id = output.conversation_id or last_conversation_id
                     if account_email and not output.account_email:
                         output.account_email = account_email
+                    if output.kind == "message":
+                        limit = rate_limit_from_message(output.text)
+                        if limit is not None:
+                            raise ImageRateLimitedError(limit)
                     if output.kind == "message" and request.message_as_error:
                         raise ImageGenerationError(
                             output.text or "Image generation was rejected by upstream policy.",
@@ -1387,10 +1476,10 @@ def _generate_single_image(
             finally:
                 _remove_image_conversation_later(backend, last_conversation_id, success=returned_result)
             if returned_message:
-                account_service.mark_image_result(token, False)
+                slot.finish(False)
                 return outputs
             if not returned_result:
-                account_service.mark_image_result(token, False)
+                slot.finish(False)
                 if emitted_for_token:
                     conv_id = outputs[-1].conversation_id if outputs else ""
                     raise ImageGenerationError(
@@ -1402,19 +1491,27 @@ def _generate_single_image(
                         conversation_id=conv_id,
                     )
                 return outputs
-            account_service.mark_image_result(token, True)
+            slot.finish(True)
             return outputs
+        except ImageRateLimitedError as exc:
+            # The account hit its limit before any image: cool it down and run the same
+            # request on another account.
+            slot.finish(False)
+            avoid_tokens.add(token)
+            rate_limit_switches = _switch_after_rate_limit(token, account_email, exc.limit, rate_limit_switches, index)
+            continue
         except ImagePollTimeoutError as exc:
-            account_service.mark_image_result(token, False)
+            slot.finish(False)
             if account_email:
                 setattr(exc, "account_email", account_email)
             # 轮询超时：换账号重试
             if not emitted_for_token:
                 poll_timeout_retry_count += 1
                 if poll_timeout_retry_count <= MAX_POLL_TIMEOUT_RETRIES:
+                    avoid_tokens.add(token)
                     logger.warning({
                         "event": "image_poll_timeout_retry",
-                        "request_token": token,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": poll_timeout_retry_count,
                         "index": index,
@@ -1423,7 +1520,7 @@ def _generate_single_image(
                     continue
                 logger.warning({
                     "event": "image_poll_timeout_exhausted_retries",
-                    "request_token": token,
+                    "request_token": anonymize_token(token),
                     "account_email": account_email,
                     "retry_count": poll_timeout_retry_count,
                     "index": index,
@@ -1431,10 +1528,10 @@ def _generate_single_image(
                 raise
             raise
         except ImageContentPolicyError as exc:
-            account_service.mark_image_result(token, False)
+            slot.finish(False)
             logger.warning({
                 "event": "image_stream_content_policy_error",
-                "request_token": token,
+                "request_token": anonymize_token(token),
                 "account_email": account_email,
                 "error": str(exc),
                 "index": index,
@@ -1448,7 +1545,7 @@ def _generate_single_image(
                 conversation_id=getattr(exc, "conversation_id", ""),
             ) from exc
         except ImageGenerationError as exc:
-            account_service.mark_image_result(token, False)
+            slot.finish(False)
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
             error_text = str(exc)
@@ -1456,9 +1553,10 @@ def _generate_single_image(
             if is_model_text_reply_instead_of_image(error_text) and not emitted_for_token:
                 text_reply_retry_count += 1
                 if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
+                    avoid_tokens.add(token)
                     logger.warning({
                         "event": "image_model_text_reply_retry",
-                        "request_token": token,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": text_reply_retry_count,
                         "index": index,
@@ -1467,7 +1565,7 @@ def _generate_single_image(
                     continue
                 logger.warning({
                     "event": "image_model_text_reply_exhausted_retries",
-                    "request_token": token,
+                    "request_token": anonymize_token(token),
                     "account_email": account_email,
                     "retry_count": text_reply_retry_count,
                     "index": index,
@@ -1483,22 +1581,27 @@ def _generate_single_image(
                 ) from exc
             logger.warning({
                 "event": "image_stream_generation_error",
-                "request_token": token,
+                "request_token": anonymize_token(token),
                 "account_email": account_email,
                 "error": error_text,
                 "index": index,
             })
             raise
         except Exception as exc:
-            account_service.mark_image_result(token, False)
+            slot.finish(False)
             last_error = str(exc)
             logger.warning({
                 "event": "image_stream_fail",
-                "request_token": token,
+                "request_token": anonymize_token(token),
                 "account_email": account_email,
                 "error": last_error,
                 "index": index,
             })
+            limit = rate_limit_from_upstream_error(exc)
+            if limit is not None:
+                avoid_tokens.add(token)
+                rate_limit_switches = _switch_after_rate_limit(token, account_email, limit, rate_limit_switches, index)
+                continue
             if not emitted_for_token and is_token_invalid_error(last_error):
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 if refreshed_token and refreshed_token != token:
@@ -1512,7 +1615,7 @@ def _generate_single_image(
                 if tls_retry_count <= MAX_TLS_RETRIES:
                     logger.warning({
                         "event": "image_stream_tls_retry",
-                        "request_token": token,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": tls_retry_count,
                         "index": index,
@@ -1527,7 +1630,7 @@ def _generate_single_image(
                     wait_secs = min(3.0 * conn_timeout_retry_count, 9.0)
                     logger.warning({
                         "event": "image_stream_conn_timeout_retry",
-                        "request_token": token,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": conn_timeout_retry_count,
                         "index": index,
@@ -1538,6 +1641,8 @@ def _generate_single_image(
                     continue
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
         finally:
+            # Covers exits no handler above saw (BaseException, a failing handler): the slot never leaks.
+            slot.release()
             if backend is not None:
                 backend.close()
 
