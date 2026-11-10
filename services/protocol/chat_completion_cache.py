@@ -58,6 +58,19 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+# The account that produced an answer; a cached copy is served by no account, so the
+# call log must not attribute it to one.
+_ACCOUNT_KEYS = ("_account_email", "_tried_account_emails")
+
+
+def _without_account(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _without_account(item) for key, item in value.items() if key not in _ACCOUNT_KEYS}
+    if isinstance(value, list):
+        return [_without_account(item) for item in value]
+    return value
+
+
 def canonical_body(body: dict[str, Any], messages: list[dict[str, Any]], *, stream: bool) -> dict[str, Any]:
     payload = {key: body.get(key) for key in CACHEABLE_TEXT_KEYS if key in body}
     payload["messages"] = messages
@@ -121,7 +134,7 @@ class ChatCompletionCache:
 
     @staticmethod
     def _copy(value: Any) -> Any:
-        return copy.deepcopy(value)
+        return copy.deepcopy(_without_account(value))
 
     def get_or_compute_response(self, key: str, compute: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         settings = self._settings()

@@ -446,6 +446,15 @@ class ConfigStore:
             return 3
 
     @property
+    def invalid_after_renewal_checks(self) -> int:
+        """Checks in a row where a renewal succeeded but ChatGPT still rejected the token
+        before the account is marked 异常 (the renewal handed back a dead token)."""
+        try:
+            return max(1, int(self.data.get("invalid_after_renewal_checks", 2)))
+        except (TypeError, ValueError):
+            return 2
+
+    @property
     def image_parallel_generation(self) -> bool:
         value = self.data.get("image_parallel_generation", True)
         if isinstance(value, str):
@@ -594,6 +603,7 @@ class ConfigStore:
         data["image_account_wait_timeout_secs"] = self.image_account_wait_timeout_secs
         data["image_rate_limit_cooldown_secs"] = self.image_rate_limit_cooldown_secs
         data["image_rate_limit_max_switches"] = self.image_rate_limit_max_switches
+        data["invalid_after_renewal_checks"] = self.invalid_after_renewal_checks
         data["image_parallel_generation"] = self.image_parallel_generation
         data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
         data["image_remove_conversation_always"] = self.image_remove_conversation_always

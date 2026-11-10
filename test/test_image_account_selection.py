@@ -116,12 +116,12 @@ class LeastInFlightTests(_PoolCase):
         # b now has a job and a is idle: load beats the avoid hint.
         self.assertEqual(self.service.get_available_access_token(avoid_tokens={"a"}), "a")
 
-    def test_text_rotation_index_is_untouched_by_image_picks(self) -> None:
+    def test_text_rotation_is_untouched_by_image_picks(self) -> None:
         self.add_accounts("a", "b")
-        before = self.service._index
+        before = (dict(self.service._text_last_pick), self.service._text_pick_seq)
         for _ in range(4):
             self.service.release_image_slot(self.service.get_available_access_token())
-        self.assertEqual(self.service._index, before)
+        self.assertEqual((dict(self.service._text_last_pick), self.service._text_pick_seq), before)
 
 
 class ReleaseTests(_PoolCase):

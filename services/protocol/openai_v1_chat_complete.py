@@ -12,6 +12,7 @@ from services.protocol.conversation import (
     ImageOutput,
     collect_image_outputs,
     collect_text,
+    copy_account_fields,
     count_message_image_tokens,
     count_message_text_tokens,
     count_text_tokens,
@@ -19,7 +20,9 @@ from services.protocol.conversation import (
     normalize_messages,
     stream_image_outputs_with_pool,
     stream_text_deltas,
+    tag_request_account,
     text_backend,
+    with_account_fields,
 )
 from services.protocol.web_search_tool import (
     WEB_SEARCH_TOOL_TYPES,
@@ -133,12 +136,27 @@ def stream_text_chat_completion(
     for delta_text in stream_text_deltas(backend, request):
         if not sent_role:
             sent_role = True
-            yield completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created)
+            # The account answering is known by the first delta and does not change after it.
+            yield tag_request_account(
+                completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created),
+                request,
+            )
         else:
             yield completion_chunk(model, {"content": delta_text}, None, completion_id, created)
     if not sent_role:
         yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
-    yield completion_chunk(model, {}, "stop", completion_id, created)
+    yield tag_request_account(completion_chunk(model, {}, "stop", completion_id, created), request)
+
+
+def text_chat_completion_response(
+    backend,
+    messages: list[dict[str, Any]],
+    model: str,
+    thinking_effort: str = "",
+) -> dict[str, Any]:
+    request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
+    text = collect_text(backend, request)
+    return tag_request_account(completion_response(model, text, messages=messages), request)
 
 
 def collect_chat_content(chunks: Iterable[dict[str, Any]]) -> str:
@@ -213,7 +231,7 @@ def web_search_chat_response(messages: list[dict[str, Any]], model: str) -> dict
         annotations=chat_completion_annotations(annotations),
     )
     response["search_sources"] = normalized_sources(result)
-    return response
+    return copy_account_fields(response, result)
 
 
 def stream_web_search_chat_completion(messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
@@ -225,13 +243,18 @@ def stream_web_search_chat_completion(messages: list[dict[str, Any]], model: str
     created = int(time.time())
     sent = ""
     result: dict[str, Any] = {}
+    done: dict[str, Any] = {}
     for event in stream_web_search(query, model):
         if event["type"] == "done":
             result = event["result"]
+            done = event
             continue
         delta = {"content": event["text"]} if sent else {"role": "assistant", "content": event["text"]}
+        chunk = completion_chunk(model, delta, None, completion_id, created)
+        if not sent:
+            copy_account_fields(chunk, event)
         sent += event["text"]
-        yield completion_chunk(model, delta, None, completion_id, created)
+        yield chunk
     text, annotations = text_with_url_citations(result)
     tail = text[len(sent):] if text.startswith(sent) else ""
     final_delta: dict[str, Any] = {} if sent else {"role": "assistant"}
@@ -241,7 +264,7 @@ def stream_web_search_chat_completion(messages: list[dict[str, Any]], model: str
         final_delta["annotations"] = chat_completion_annotations(annotations)
     chunk = completion_chunk(model, final_delta, None, completion_id, created)
     chunk["search_sources"] = normalized_sources(result)
-    yield chunk
+    yield copy_account_fields(chunk, done)
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
@@ -268,7 +291,7 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         output_tokens=count_image_output_items_tokens(result.get("data")),
     )
     response["usage"] = chat_usage_from_image_usage(usage)
-    return response
+    return copy_account_fields(response, result)
 
 
 def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -288,6 +311,7 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
     created = int(time.time())
     sent_role = False
     sent_text = ""
+    account_email = ""
     for output in image_outputs:
         content = ""
         if output.kind == "progress":
@@ -297,16 +321,20 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
             content = build_chat_image_markdown_content({"data": output.data})
         elif output.kind == "message":
             content = output.text[len(sent_text):] if output.text.startswith(sent_text) else output.text
+        account_email = output.account_email or account_email
         if not content:
             continue
         if not sent_role:
             sent_role = True
-            yield completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created)
+            yield with_account_fields(
+                completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created),
+                account_email,
+            )
         else:
             yield completion_chunk(model, {"content": content}, None, completion_id, created)
     if not sent_role:
         yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
-    yield completion_chunk(model, {}, "stop", completion_id, created)
+    yield with_account_fields(completion_chunk(model, {}, "stop", completion_id, created), account_email)
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
@@ -331,9 +359,5 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     key = cache_key(body, messages, stream=False)
     return chat_completion_cache.get_or_compute_response(
         key,
-        lambda: completion_response(
-            model,
-            collect_text(text_backend(model), ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)),
-            messages=messages,
-        ),
+        lambda: text_chat_completion_response(text_backend(model), messages, model, thinking_effort),
     )

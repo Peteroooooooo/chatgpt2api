@@ -38,13 +38,16 @@ def search_model_for(requested: object = None) -> str:
 def search_events(prompt: str, model: str | None = None) -> Iterator[dict[str, Any]]:
     """Search on an account allowed to run ``model``; yield answer deltas, then the result.
 
-    Events: {"type": "delta", "text"} while the answer is written, then
-    {"type": "done", "result", "token"}. Raises ModelUnavailableError when no account can run it.
+    Events: {"type": "delta", "text", "account_email"} while the answer is written, then
+    {"type": "done", "result", "token", "account_email", "tried_account_emails"}.
+    Raises ModelUnavailableError when no account can run it.
     """
     from services.model_service import ModelUnavailableError, model_catalog_service
+    from services.protocol.conversation import _attach_account_to_error, account_email_for_token
 
     model = model or current_model()
     tried: set[str] = set()
+    tried_emails: list[str] = []
     last_error: Exception | None = None
     for _attempt in range(SEARCH_ATTEMPTS):
         try:
@@ -62,20 +65,25 @@ def search_events(prompt: str, model: str | None = None) -> Iterator[dict[str, A
                 code="model_no_account",
             )
         tried.add(token)
+        email = account_email_for_token(token)
+        earlier_emails = [item for item in tried_emails if item != email]
+        if email and email not in tried_emails:
+            tried_emails.append(email)
         backend = OpenAIBackendAPI(token)
         sent_text = False
         try:
             for event in backend.search_events(prompt, model=model):
                 if event["type"] == "delta":
                     sent_text = True
-                    yield event
+                    yield {**event, "account_email": email}
                 elif event["type"] == "done":
                     model_catalog_service.record_conversation_result(token, model)
                     account_service.mark_text_used(token)
-                    yield {**event, "token": token}
+                    yield {**event, "token": token, "account_email": email, "tried_account_emails": earlier_emails}
             return
         except Exception as exc:
             model_catalog_service.record_conversation_result(token, model, exc)
+            _attach_account_to_error(exc, email, earlier_emails)
             if sent_text:
                 raise
             last_error = exc
@@ -86,19 +94,20 @@ def search_events(prompt: str, model: str | None = None) -> Iterator[dict[str, A
 
 
 def search_with_account(prompt: str, model: str | None = None) -> tuple[dict[str, Any], str]:
-    """Run one search to the end. Returns (result, access_token)."""
+    """Run one search to the end. Returns (result, access_token); the result carries the
+    serving account for the call log (_account_email, _tried_account_emails)."""
+    from services.protocol.conversation import copy_account_fields
+
     result: dict[str, Any] = {}
     token = ""
     for event in search_events(prompt, model):
         if event["type"] == "done":
-            result, token = event["result"], event["token"]
+            result, token = copy_account_fields(dict(event["result"]), event), event["token"]
     if not token:
         raise RuntimeError("search returned no result")
     return result, token
 
 
 def handle(body: dict[str, object]) -> dict[str, object]:
-    result, token = search_with_account(str(body["prompt"]), search_model_for(body.get("model")))
-    account = account_service.get_account(token) or {}
-    result["_account_email"] = str(account.get("email") or "")
+    result, _token = search_with_account(str(body["prompt"]), search_model_for(body.get("model")))
     return result

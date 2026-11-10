@@ -21,7 +21,7 @@ from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
-INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id"}
+INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_tried_account_emails"}
 
 
 class LogService:
@@ -144,6 +144,25 @@ def _collect_account_emails(value: object) -> list[str]:
     return emails
 
 
+def _collect_tried_account_emails(value: object) -> list[str]:
+    emails: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "_tried_account_emails" and isinstance(item, list):
+                emails.extend(str(email).strip() for email in item if isinstance(email, str) and email.strip())
+            else:
+                emails.extend(_collect_tried_account_emails(item))
+    elif isinstance(value, list):
+        for item in value:
+            emails.extend(_collect_tried_account_emails(item))
+    return emails
+
+
+def _error_tried_account_emails(exc: BaseException) -> list[str]:
+    value = getattr(exc, "tried_account_emails", None)
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
 def _collect_conversation_ids(value: object) -> list[str]:
     ids: list[str] = []
     if isinstance(value, dict):
@@ -245,7 +264,8 @@ class LoggedCall:
             self.log("调用失败", status="failed", error=str(exc))
             return _model_unavailable_response(exc, sse)
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+                     tried_account_emails=_error_tried_account_emails(exc))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
@@ -253,7 +273,8 @@ class LoggedCall:
         if isinstance(result, dict):
             self.log("调用完成", result)
             response = dict(result)
-            response.pop("_account_email", None)
+            for key in INTERNAL_RESPONSE_KEYS:
+                response.pop(key, None)
             return response
 
         sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
@@ -270,7 +291,8 @@ class LoggedCall:
             self.log("调用失败", status="failed", error=str(exc))
             return _model_unavailable_response(exc, sse)
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+                     tried_account_emails=_error_tried_account_emails(exc))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
@@ -282,12 +304,14 @@ class LoggedCall:
     def stream(self, items):
         urls: list[str] = []
         account_emails: list[str] = []
+        tried_account_emails: list[str] = []
         conversation_ids: list[str] = []
         failed = False
         try:
             for item in items:
                 urls.extend(_collect_urls(item))
                 account_emails.extend(_collect_account_emails(item))
+                tried_account_emails.extend(_collect_tried_account_emails(item))
                 conversation_ids.extend(_collect_conversation_ids(item))
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
@@ -299,6 +323,7 @@ class LoggedCall:
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
+                tried_account_emails=tried_account_emails or _error_tried_account_emails(exc),
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
                 from services.protocol.conversation import ImageGenerationError, public_image_error_message
@@ -308,10 +333,12 @@ class LoggedCall:
         finally:
             if not failed:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
-                         conversation_id=conversation_ids[0] if conversation_ids else "")
+                         conversation_id=conversation_ids[0] if conversation_ids else "",
+                         tried_account_emails=tried_account_emails)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
-            urls: list[str] | None = None, account_email: str = "", conversation_id: str = "") -> None:
+            urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
+            tried_account_emails: list[str] | None = None) -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -336,6 +363,11 @@ class LoggedCall:
             email = emails[0] if emails else ""
         if email:
             detail["account_email"] = email
+        # Accounts this call tried before the one in account_email (a fallback happened).
+        tried = list(dict.fromkeys([*(tried_account_emails or []), *_collect_tried_account_emails(result)]))
+        tried = [item for item in tried if item != email]
+        if tried:
+            detail["tried_account_emails"] = tried
         conv_id = str(conversation_id or "").strip()
         if not conv_id:
             conv_ids = _collect_conversation_ids(result)

@@ -315,6 +315,9 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    # Set by stream_text_deltas: the email of the account answering, and of accounts tried before it.
+    account_email: str = ""
+    tried_account_emails: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -734,8 +737,55 @@ def text_backend(model: str = "auto") -> OpenAIBackendAPI:
     return OpenAIBackendAPI(access_token=account_service.get_text_access_token(model=model))
 
 
+def account_email_for_token(access_token: str) -> str:
+    if not access_token:
+        return ""
+    account = account_service.get_account(access_token)
+    email = account.get("email") if isinstance(account, dict) else ""
+    return email.strip() if isinstance(email, str) else ""
+
+
+def with_account_fields(payload: dict[str, Any], account_email: str, tried_account_emails: list[str] | None = None) -> dict[str, Any]:
+    """Mark a response or chunk with the serving account for the call log (stripped before sending)."""
+    if account_email:
+        payload["_account_email"] = account_email
+    if tried_account_emails:
+        payload["_tried_account_emails"] = list(tried_account_emails)
+    return payload
+
+
+def tag_request_account(payload: dict[str, Any], request: ConversationRequest) -> dict[str, Any]:
+    return with_account_fields(payload, request.account_email, request.tried_account_emails)
+
+
+def copy_account_fields(payload: dict[str, Any], source: object) -> dict[str, Any]:
+    """Copy the serving account from a search event / result / chunk onto another payload."""
+    if not isinstance(source, dict):
+        return payload
+    email = source.get("_account_email") or source.get("account_email") or ""
+    tried = source.get("_tried_account_emails") or source.get("tried_account_emails") or []
+    return with_account_fields(
+        payload,
+        email if isinstance(email, str) else "",
+        [item for item in tried if isinstance(item, str)] if isinstance(tried, list) else [],
+    )
+
+
+def _attach_account_to_error(exc: BaseException, account_email: str, tried_account_emails: list[str]) -> None:
+    try:
+        if account_email and not getattr(exc, "account_email", ""):
+            setattr(exc, "account_email", account_email)
+        if tried_account_emails and not getattr(exc, "tried_account_emails", None):
+            setattr(exc, "tried_account_emails", list(tried_account_emails))
+    except Exception:
+        pass
+
+
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
+    """Yield answer text. request.account_email names the account answering before the first
+    delta is yielded; a switch to another account only happens before any text went out."""
     attempted_tokens: set[str] = set()
+    tried_emails: list[str] = []
     token = getattr(backend, "access_token", "")
     emitted = False
     while True:
@@ -743,6 +793,11 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             raise RuntimeError("no available text account")
         if token:
             attempted_tokens.add(token)
+        email = account_email_for_token(token)
+        request.account_email = email
+        request.tried_account_emails = [item for item in tried_emails if item != email]
+        if email and email not in tried_emails:
+            tried_emails.append(email)
         active_backend = None
         try:
             active_backend = OpenAIBackendAPI(access_token=token)
@@ -775,6 +830,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                     )
                 if token:
                     continue
+            _attach_account_to_error(exc, request.account_email, request.tried_account_emails)
             raise
         finally:
             if active_backend is not None:

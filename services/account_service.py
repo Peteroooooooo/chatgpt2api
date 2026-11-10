@@ -64,12 +64,16 @@ class AccountService:
         self._lock = Lock()
         self._token_refresh_lock = Lock()
         self._image_slot_condition = Condition(self._lock)
-        self._index = 0
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
         # Image picks: sequence number of each account's last pick, for round-robin among equally loaded accounts.
         self._image_last_pick: dict[str, int] = {}
         self._image_pick_seq = 0
+        # Text picks (chat, responses, messages, search): the account picked longest ago goes next.
+        # Keyed by access token like _image_last_pick and moved with it on renewal and merge.
+        self._text_last_pick: dict[str, int] = {}
+        self._text_pick_seq = 0
+        self._seed_text_last_pick()
         self._token_aliases: dict[str, str] = {}
         self._real_chat_test_active_tokens: set[str] = set()
         self._cumulative_total = self._load_cumulative_total()
@@ -144,6 +148,34 @@ class AccountService:
 
     def _save_accounts(self) -> None:
         self.storage.save_accounts(list(self._accounts.values()))
+
+    def _seed_text_last_pick(self) -> None:
+        """Start the text rotation from each account's stored last_used_at.
+
+        Without this a restart would send the next requests to the head of the list.
+        Accounts never used stay out of the map and so go first.
+        """
+        used = sorted(
+            (
+                (used_at, token)
+                for token, account in self._accounts.items()
+                if (used_at := self._parse_time(account.get("last_used_at"))) is not None
+            ),
+            key=lambda item: item[0],
+        )
+        self._text_last_pick = {token: seq for seq, (_, token) in enumerate(used, start=1)}
+        self._text_pick_seq = len(used)
+
+    def _move_pick_records_locked(self, old_token: str, new_token: str) -> None:
+        """Carry an account's in-memory pick history over to its new access token.
+
+        When several records end on one token (a merge), the most recent pick wins so the
+        merged account does not jump the queue.
+        """
+        for picks in (self._image_last_pick, self._text_last_pick):
+            if old_token in picks:
+                seq = picks.pop(old_token)
+                picks[new_token] = max(seq, picks.get(new_token, seq))
 
     @staticmethod
     def _image_cooldown_until(account: dict) -> datetime | None:
@@ -271,6 +303,9 @@ class AccountService:
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["invalid_count"] = int(normalized.get("invalid_count") or 0)
+        # Checks in a row where a renewal worked but ChatGPT still rejected the token.
+        normalized["invalid_after_renewal_count"] = int(normalized.get("invalid_after_renewal_count") or 0)
+        normalized["invalid_after_renewal_since"] = normalized.get("invalid_after_renewal_since") or None
         normalized["last_used_at"] = normalized.get("last_used_at")
         normalized["last_invalid_at"] = normalized.get("last_invalid_at") or None
         normalized["last_refresh_error"] = normalized.get("last_refresh_error") or None
@@ -496,24 +531,26 @@ class AccountService:
             next_item["last_token_refresh_at"] = now
             next_item["last_token_refresh_error"] = None
             next_item["last_token_refresh_error_at"] = None
-            next_item["invalid_count"] = 0
-            next_item["last_invalid_at"] = None
-            next_item["last_refresh_error"] = None
-            next_item["last_refresh_error_at"] = None
+            rotated = new_token != old_token
+            if rotated:
+                # Only a new token clears the invalid-token record. A renewal that hands back
+                # the token ChatGPT just rejected proves nothing, so the count keeps going.
+                next_item["invalid_count"] = 0
+                next_item["last_invalid_at"] = None
+                next_item["last_refresh_error"] = None
+                next_item["last_refresh_error_at"] = None
 
             account = self._normalize_account(next_item)
             if account is None:
                 return old_token
 
-            rotated = new_token != old_token
             if rotated:
                 self._accounts.pop(old_token, None)
                 self._token_aliases[old_token] = new_token
                 old_inflight = int(self._image_inflight.pop(old_token, 0))
                 if old_inflight:
                     self._image_inflight[new_token] = int(self._image_inflight.get(new_token, 0)) + old_inflight
-                if old_token in self._image_last_pick:
-                    self._image_last_pick[new_token] = self._image_last_pick.pop(old_token)
+                self._move_pick_records_locked(old_token, new_token)
             self._accounts[new_token] = account
             self._save_accounts()
             self._image_slot_condition.notify_all()
@@ -736,6 +773,8 @@ class AccountService:
                     "last_relogin_error": None,
                     "relogin_fail_count": 0,
                     "relogin_paused": False,
+                    "invalid_after_renewal_count": 0,
+                    "invalid_after_renewal_since": None,
                 }, quiet=True)
 
                 log_service.add(
@@ -1197,6 +1236,7 @@ class AccountService:
                 token
                 for account in self._accounts.values()
                 if str(account.get("refresh_token") or "").strip()
+                and not self._is_dead_after_renewal(account)
                 and (token := str(account.get("access_token") or "").strip())
                 and self._token_needs_refresh(token)
             ]
@@ -1244,6 +1284,12 @@ class AccountService:
         with self._lock:
             return list(self._accounts)
 
+    def _resolve_excluded_tokens_locked(self, tokens: set[str] | None) -> set[str]:
+        """The given tokens plus their current tokens, so an account renewed since it was
+        tried still counts as tried."""
+        excluded = set(tokens or set())
+        return excluded | {self._resolve_access_token_locked(token) for token in excluded if token}
+
     def _list_ready_candidate_tokens(
             self,
             excluded_tokens: set[str] | None = None,
@@ -1251,7 +1297,7 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
-        excluded = set(excluded_tokens or set())
+        excluded = self._resolve_excluded_tokens_locked(excluded_tokens)
         return [
             token
             for item in self._accounts.values()
@@ -1284,6 +1330,7 @@ class AccountService:
         avoid = set(avoid_tokens or set())
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         with self._image_slot_condition:
+            avoid = self._resolve_excluded_tokens_locked(avoid)
             while True:
                 ready = self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
                 if not ready:
@@ -1385,16 +1432,18 @@ class AccountService:
     ) -> str:
         """Pick an account for a text request under the model rules.
 
+        The eligible account picked longest ago goes next (never-picked accounts first);
+        excluded_tokens are the accounts this request already tried.
         internal=True is for built-in features (search, tests): the model's exposed switch
         does not apply, and a model no account type lists runs on any account.
         Raises ModelUnavailableError when the model is hidden or no allowed account can run it.
         """
-        excluded = set(excluded_tokens or set())
         requested_model = str(model or "auto").strip() or "auto"
         from services.model_service import ModelUnavailableError, model_catalog_service
 
         route = model_catalog_service.resolve_route(requested_model, internal=internal)
         with self._lock:
+            excluded = self._resolve_excluded_tokens_locked(excluded_tokens)
             candidates = [
                 token
                 for account in self._accounts.values()
@@ -1414,8 +1463,9 @@ class AccountService:
                     status_code=403,
                     code="model_no_account",
                 )
-            access_token = candidates[self._index % len(candidates)]
-            self._index += 1
+            access_token = min(candidates, key=lambda token: self._text_last_pick.get(token, 0))
+            self._text_pick_seq += 1
+            self._text_last_pick[access_token] = self._text_pick_seq
         return self.refresh_access_token(access_token, event="get_text_access_token") or access_token
 
     def mark_text_used(self, access_token: str) -> None:
@@ -1605,6 +1655,7 @@ class AccountService:
                             self._image_inflight[access_token] = (
                                 int(self._image_inflight.get(access_token, 0)) + old_inflight
                             )
+                        self._move_pick_records_locked(old_token, access_token)
                     skipped += 1
                     merged += len(same_user_tokens)
                 elif current is None:
@@ -1646,16 +1697,13 @@ class AccountService:
             for token in target_set:
                 self._image_inflight.pop(token, None)
                 self._image_last_pick.pop(token, None)
+                self._text_last_pick.pop(token, None)
             self._token_aliases = {
                 old: new
                 for old, new in self._token_aliases.items()
                 if old not in target_set and new not in target_set
             }
             if removed:
-                if self._accounts:
-                    self._index %= len(self._accounts)
-                else:
-                    self._index = 0
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
             items = [dict(item) for item in self._accounts.values()]
@@ -1697,6 +1745,8 @@ class AccountService:
             next_item["last_invalid_at"] = None
             next_item["last_refresh_error"] = None
             next_item["last_refresh_error_at"] = None
+            next_item["invalid_after_renewal_count"] = 0
+            next_item["invalid_after_renewal_since"] = None
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[access_token] = account
@@ -1721,7 +1771,15 @@ class AccountService:
         event: str,
         error: str,
         defer_invalid_removal: bool = True,
+        after_renewal: bool = False,
     ) -> bool:
+        """Note a token ChatGPT rejected. Returns True when the account should be marked 异常 now.
+
+        after_renewal=True means a renewal had just succeeded and ChatGPT rejected the token
+        it handed back. invalid_after_renewal_checks such checks in a row (spread over at
+        least _INVALID_CONFIRM_SECONDS) end the deferral, since renewing again would only
+        hand back the same dead token.
+        """
         now = datetime.now(timezone.utc)
         with self._lock:
             access_token = self._resolve_access_token_locked(access_token)
@@ -1734,6 +1792,15 @@ class AccountService:
             next_item["last_invalid_at"] = now.isoformat()
             next_item["last_refresh_error"] = str(error or "invalid access token")
             next_item["last_refresh_error_at"] = now.isoformat()
+            dead_after_renewal = False
+            if after_renewal:
+                streak = int(current.get("invalid_after_renewal_count") or 0) + 1
+                since = self._parse_time(current.get("invalid_after_renewal_since")) or now
+                next_item["invalid_after_renewal_count"] = streak
+                next_item["invalid_after_renewal_since"] = since.isoformat()
+                dead_after_renewal = self._invalid_after_renewal_confirmed(current, streak, since, now)
+                if dead_after_renewal:
+                    should_defer = False
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[access_token] = account
@@ -1745,7 +1812,34 @@ class AccountService:
                     {"source": event, "token": anonymize_token(access_token), "error": str(error or "")},
                 )
                 return False
+            if dead_after_renewal:
+                log_service.add(
+                    LOG_TYPE_ACCOUNT,
+                    "续期后 token 仍被拒绝，标记异常账号",
+                    {
+                        "source": event,
+                        "token": anonymize_token(access_token),
+                        "error": str(error or ""),
+                        "checks": int(next_item["invalid_after_renewal_count"]),
+                    },
+                )
         return True
+
+    def _invalid_after_renewal_confirmed(self, account: dict, streak: int, since: datetime, now: datetime) -> bool:
+        if streak < config.invalid_after_renewal_checks:
+            return False
+        if (now - since).total_seconds() < self._INVALID_CONFIRM_SECONDS:
+            return False
+        created_at = self._parse_time(account.get("created_at"))
+        return created_at is None or (now - created_at).total_seconds() >= self._NEW_ACCOUNT_INVALID_GRACE_SECONDS
+
+    @staticmethod
+    def _is_dead_after_renewal(account: dict) -> bool:
+        """异常 because renewals kept handing back a rejected token: renewing it again is pointless."""
+        return (
+            account.get("status") == "异常"
+            and int(account.get("invalid_after_renewal_count") or 0) >= config.invalid_after_renewal_checks
+        )
 
     def mark_image_result(self, access_token: str, success: bool) -> dict | None:
         if not access_token:
@@ -1877,8 +1971,14 @@ class AccountService:
             finally:
                 backend.close()
         except InvalidAccessTokenError as exc:
-            refresh_error_before = (self.get_account(active_token) or {}).get("last_token_refresh_error_at")
+            before = self.get_account(active_token) or {}
+            refresh_error_before = before.get("last_token_refresh_error_at")
+            renewed_at_before = before.get("last_token_refresh_at")
             refreshed_token = self.refresh_access_token(active_token, force=True, event=f"{event}:invalid_access_token")
+            renewed = bool(
+                (renewed_at := (self.get_account(refreshed_token or active_token) or {}).get("last_token_refresh_at"))
+                and renewed_at != renewed_at_before
+            )
             if refreshed_token and refreshed_token != active_token:
                 try:
                     backend = OpenAIBackendAPI(refreshed_token)
@@ -1892,6 +1992,7 @@ class AccountService:
                         event,
                         str(retry_exc),
                         defer_invalid_removal=defer_invalid_removal,
+                        after_renewal=True,
                     ):
                         self.remove_invalid_token(refreshed_token, event)
                     raise
@@ -1906,6 +2007,7 @@ class AccountService:
                     event,
                     str(exc),
                     defer_invalid_removal=defer_invalid_removal and not session_ended,
+                    after_renewal=renewed,
                 ):
                     self.remove_invalid_token(active_token, event)
                 raise

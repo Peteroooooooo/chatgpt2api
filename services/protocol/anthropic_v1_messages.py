@@ -11,7 +11,7 @@ from typing import Any
 
 from services.account_service import account_service
 from services.openai_backend_api import OpenAIBackendAPI
-from services.protocol.conversation import count_message_tokens, count_text_tokens, normalize_messages
+from services.protocol.conversation import copy_account_fields, count_message_tokens, count_text_tokens, normalize_messages
 from services.protocol.openai_v1_chat_complete import collect_chat_content, stream_text_chat_completion
 
 XML_TOOL_RULE = """Tool output adapter: when calling tools, output ONLY this XML and no prose/markdown:
@@ -230,11 +230,15 @@ def stream_events(chunks: Iterable[dict[str, object]], model: str, input_tokens:
     tool_mode = isinstance(tools, list) and bool(tools)
     tool_started = False
     text_open = False
+    # Serving account from the chat chunks, passed on for the call log (stripped before sending).
+    account: dict[str, object] = {}
+    account_sent = False
     yield {"type": "message_start", "message": {"id": message_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": input_tokens, "output_tokens": 0}}}
     if not tool_mode:
         text_open = True
         yield {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
     for chunk in chunks:
+        copy_account_fields(account, chunk)
         choice = (chunk.get("choices") or [{}])[0]
         delta = choice.get("delta") or {}
         text_delta = delta.get("content", "") if isinstance(delta, dict) else ""
@@ -249,7 +253,11 @@ def stream_events(chunks: Iterable[dict[str, object]], model: str, input_tokens:
                             text_open = True
                             yield {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
                         streamed_text = visible_text
-                        yield {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text_delta}}
+                        event = {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text_delta}}
+                        if not account_sent:
+                            account_sent = True
+                            event.update(account)
+                        yield event
                 tool_started = tool_mode and visible_text != current_text
         if choice.get("finish_reason"):
             content, stop_reason = content_blocks(current_text, tools)
@@ -268,7 +276,7 @@ def stream_events(chunks: Iterable[dict[str, object]], model: str, input_tokens:
                     start_index = 1
                     content = content[1:]
                 yield from _stream_buffered_blocks(content, start_index)
-            yield {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": output_tokens(current_text)}}
+            yield {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": output_tokens(current_text)}, **account}
             break
     yield {"type": "message_stop", "created": created}
 
@@ -297,11 +305,15 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
             lambda text: count_text_tokens(text, request.model),
             request.tools,
         )
-    text = collect_chat_content(stream_text_chat_completion(request.backend, request.messages, request.model))
-    return message_response(
+    chunks = list(stream_text_chat_completion(request.backend, request.messages, request.model))
+    text = collect_chat_content(chunks)
+    response = message_response(
         request.model,
         text,
         count_message_tokens(request.messages, request.model),
         count_text_tokens(text, request.model),
         request.tools,
     )
+    for chunk in chunks:
+        copy_account_fields(response, chunk)
+    return response

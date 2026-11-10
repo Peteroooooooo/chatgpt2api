@@ -11,6 +11,7 @@ from services.protocol.chat_completion_cache import cache_key, chat_completion_c
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
+    copy_account_fields,
     count_message_image_tokens,
     count_message_text_tokens,
     count_text_tokens,
@@ -18,7 +19,9 @@ from services.protocol.conversation import (
     normalize_messages,
     stream_image_outputs_with_pool,
     stream_text_deltas,
+    tag_request_account,
     text_backend,
+    with_account_fields,
 )
 from services.protocol.web_search_tool import (
     WEB_SEARCH_TOOL_TYPES,
@@ -310,8 +313,12 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
     yield {"type": "response.output_item.added", "output_index": 0, "item": text_output_item("", item_id, "in_progress")}
     request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
     for delta in stream_text_deltas(backend, request):
+        event = {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta}
+        if not full_text:
+            # The account answering is known by the first delta and does not change after it.
+            tag_request_account(event, request)
         full_text += delta
-        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta}
+        yield event
     yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": full_text}
     item = text_output_item(full_text, item_id, "completed")
     yield {"type": "response.output_item.done", "output_index": 0, "item": item}
@@ -320,7 +327,10 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
         input_image_tokens=count_message_image_tokens(messages, model),
         output_text_tokens=count_text_tokens(full_text, model),
     )
-    yield response_completed(response_id, model, created, [item], usage)
+    completed = response_completed(response_id, model, created, [item], usage)
+    # Inside "response" so the non-streaming reply (collect_response) carries it too.
+    tag_request_account(completed["response"], request)
+    yield completed
 
 
 def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
@@ -349,12 +359,17 @@ def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, An
 
     sent = ""
     result: dict[str, Any] = {}
+    done: dict[str, Any] = {}
     for event in itertools.chain([first], events):
         if event["type"] == "done":
             result = event["result"]
+            done = event
             continue
+        delta_event = {"type": "response.output_text.delta", "item_id": item_id, "output_index": 1, "content_index": 0, "delta": event["text"]}
+        if not sent:
+            copy_account_fields(delta_event, event)
         sent += event["text"]
-        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 1, "content_index": 0, "delta": event["text"]}
+        yield delta_event
 
     text, annotations = text_with_url_citations(result)
     tail = text[len(sent):] if text.startswith(sent) else ""
@@ -370,7 +385,9 @@ def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, An
         input_image_tokens=count_message_image_tokens(messages, model),
         output_text_tokens=count_text_tokens(text, model),
     )
-    yield response_completed(response_id, model, created, [search_item, message_item], usage)
+    completed = response_completed(response_id, model, created, [search_item, message_item], usage)
+    copy_account_fields(completed["response"], done)
+    yield completed
 
 
 def stream_image_response(
@@ -396,7 +413,9 @@ def stream_image_response(
             yield {"type": "response.output_text.delta", "item_id": item["id"], "output_index": 0, "content_index": 0, "delta": text}
             yield {"type": "response.output_text.done", "item_id": item["id"], "output_index": 0, "content_index": 0, "text": text}
             yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-            yield response_completed(response_id, model, created, [item], usage)
+            completed = response_completed(response_id, model, created, [item], usage)
+            with_account_fields(completed["response"], output.account_email)
+            yield completed
             return
         if output.kind != "result":
             continue
@@ -409,7 +428,9 @@ def stream_image_response(
             )
             for output_index, item in enumerate(items):
                 yield {"type": "response.output_item.done", "output_index": output_index, "item": item}
-            yield response_completed(response_id, model, created, items, usage)
+            completed = response_completed(response_id, model, created, items, usage)
+            with_account_fields(completed["response"], output.account_email)
+            yield completed
             return
     raise RuntimeError("image generation failed")
 
