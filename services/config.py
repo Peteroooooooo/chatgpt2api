@@ -382,11 +382,13 @@ class ConfigStore:
             return 5
 
     @property
-    def image_retention_days(self) -> int:
+    def image_retention_hours(self) -> int:
+        """Hours a locally stored image (one handed out as a URL) is kept. The old
+        image_retention_days key is ignored: an old config falls back to 1 hour."""
         try:
-            return max(1, int(self.data.get("image_retention_days", 30)))
+            return max(1, int(self.data.get("image_retention_hours", 1)))
         except (TypeError, ValueError):
-            return 30
+            return 1
 
     @property
     def image_poll_timeout_secs(self) -> int:
@@ -563,7 +565,7 @@ class ConfigStore:
         return path
 
     def cleanup_old_images(self) -> int:
-        cutoff = time.time() - self.image_retention_days * 86400
+        cutoff = time.time() - self.image_retention_hours * 3600
         removed = 0
         for path in self.images_dir.rglob("*"):
             if path.is_file() and path.stat().st_mtime < cutoff:
@@ -595,7 +597,8 @@ class ConfigStore:
     def get(self) -> dict[str, object]:
         data = dict(self.data)
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
-        data["image_retention_days"] = self.image_retention_days
+        data.pop("image_retention_days", None)
+        data["image_retention_hours"] = self.image_retention_hours
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
@@ -669,6 +672,7 @@ class ConfigStore:
                     incoming_runtime["_existing_cf_clearance"] = previous_clearance.get("cf_clearance")
             next_data["proxy_runtime"] = _normalize_proxy_runtime_settings(incoming_runtime)
         next_data.pop("backup_state", None)
+        next_data.pop("image_retention_days", None)
         self.data = next_data
         self._save()
         return self.get()

@@ -17,6 +17,7 @@ from services.image_tags_service import load_tags, remove_tags
 from utils.log import logger
 
 THUMBNAIL_SIZE = (320, 320)
+IMAGE_CLEANUP_INTERVAL_SECS = 300
 
 
 def _cleanup_empty_dirs(root: Path) -> None:
@@ -349,25 +350,51 @@ def download_images_zip(paths: list[str]) -> io.BytesIO:
     return buf
 
 
-def _auto_cleanup_worker(stop_event: threading.Event) -> None:
-    """后台线程：每30分钟检查存储，空间低于阈值自动清理最旧图片"""
-    import shutil
-    min_free_mb = getattr(config, "image_min_free_mb", None)
-    if min_free_mb is None:
-        min_free_mb = 500
+def _image_exists(rel: str) -> bool:
+    try:
+        return image_storage_service.exists(rel)
+    except HTTPException:
+        return False
 
-    while not stop_event.wait(1800):  # 每30分钟
-        try:
-            config.cleanup_old_images()
-            cleanup_image_thumbnails()
-            usage = shutil.disk_usage(config.images_dir)
-            free_mb = usage.free // (1024 * 1024)
-            if free_mb < min_free_mb:
-                logger.info({"event": "image_auto_cleanup", "free_mb": free_mb, "min_free_mb": min_free_mb})
-                result = delete_to_target(min_free_mb)
-                logger.info({"event": "image_auto_cleanup_done", **result})
-        except Exception:
-            pass
+
+def prune_image_metadata() -> dict[str, int]:
+    """Remove thumbnails, index entries and tags left behind by images that are gone."""
+    thumbnails = cleanup_image_thumbnails()
+    index_entries = len(image_storage_service.prune_missing())
+    tags = load_tags()
+    stale_tags = [rel for rel in tags if not _image_exists(rel)]
+    for rel in stale_tags:
+        remove_tags(rel)
+    return {"thumbnails": thumbnails, "index_entries": index_entries, "tags": len(stale_tags)}
+
+
+def run_image_cleanup() -> dict[str, object]:
+    """Delete images older than image_retention_hours, then the oldest ones while free
+    space is below the minimum, then the metadata of every deleted image."""
+    result: dict[str, object] = {}
+    try:
+        result["expired"] = config.cleanup_old_images()
+        min_free_mb = getattr(config, "image_min_free_mb", None)
+        if min_free_mb is None:
+            min_free_mb = 500
+        free_mb = shutil.disk_usage(config.images_dir).free // (1024 * 1024)
+        if free_mb < min_free_mb:
+            logger.info({"event": "image_auto_cleanup", "free_mb": free_mb, "min_free_mb": min_free_mb})
+            low_disk = delete_to_target(min_free_mb)
+            logger.info({"event": "image_auto_cleanup_done", **low_disk})
+            result["low_disk_removed"] = low_disk.get("removed", 0)
+        result.update(prune_image_metadata())
+        if any(result.values()):
+            logger.info({"event": "image_expired_cleanup", "retention_hours": config.image_retention_hours, **result})
+    except Exception as exc:
+        logger.warning({"event": "image_cleanup_failed", "error": repr(exc)[:300]})
+    return result
+
+
+def _auto_cleanup_worker(stop_event: threading.Event) -> None:
+    """后台线程：每5分钟删除过期图片；空间低于阈值时再删最旧图片"""
+    while not stop_event.wait(IMAGE_CLEANUP_INTERVAL_SECS):
+        run_image_cleanup()
 
 
 def start_image_cleanup_scheduler(stop_event: threading.Event) -> threading.Thread:

@@ -31,7 +31,7 @@ class ImageTaskServiceTests(unittest.TestCase):
             path,
             generation_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/image.png"}]}),
             edit_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/edit.png"}]}),
-            retention_days_getter=lambda: 30,
+            retention_hours_getter=lambda: 30 * 24,
         )
 
     def test_duplicate_submit_uses_existing_task(self):

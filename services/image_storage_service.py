@@ -356,6 +356,20 @@ class ImageStorageService:
                 self._save_index(items)
         return removed
 
+    def prune_missing(self) -> list[str]:
+        """Drop index entries whose image is gone (no local file, no WebDAV copy)."""
+        with self._index_lock:
+            items = self._load_index()
+            missing = [
+                rel for rel, item in items.items()
+                if not _is_image_rel(rel) or (not _local_image_path(rel).is_file() and not item.get("webdav"))
+            ]
+            if missing:
+                for rel in missing:
+                    items.pop(rel, None)
+                self._save_index(items)
+        return missing
+
     def sync_all(self) -> dict[str, int]:
         settings = self.settings()
         if self.mode() not in {"webdav", "both"}:

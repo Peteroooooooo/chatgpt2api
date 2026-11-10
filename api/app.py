@@ -14,7 +14,7 @@ from services.account_keeper import account_keeper
 from services.backup_service import backup_service
 from services.config import config
 from services.daily_chat import daily_chat_service
-from services.image_service import start_image_cleanup_scheduler
+from services.image_service import run_image_cleanup, start_image_cleanup_scheduler
 
 
 def create_app() -> FastAPI:
@@ -28,7 +28,7 @@ def create_app() -> FastAPI:
         patrol_thread = account_keeper.start_scheduler(stop_event)
         daily_chat_thread = daily_chat_service.start_scheduler(stop_event)
         backup_service.start()
-        config.cleanup_old_images()
+        run_image_cleanup()
         try:
             yield
         finally:
