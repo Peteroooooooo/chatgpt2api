@@ -224,7 +224,12 @@ export function AccountsTable({ rows, selected, busy, actions, onToggle, onToggl
                     </span>
                   ) : null}
                   {account.has_plus_promo ? (
-                    <span title={account.promo_title || "有 Plus 试用资格"} className="shrink-0 text-amber-600 dark:text-amber-400">
+                    <span title={`Plus：${account.promo_title || "有 Plus 试用资格"}`} className="shrink-0 text-amber-600 dark:text-amber-400">
+                      <Gift className="size-3.5" />
+                    </span>
+                  ) : null}
+                  {account.has_team_promo ? (
+                    <span title={`Team：${account.team_promo_title || "有 Team 试用资格"}`} className="shrink-0 text-sky-600 dark:text-sky-400">
                       <Gift className="size-3.5" />
                     </span>
                   ) : null}

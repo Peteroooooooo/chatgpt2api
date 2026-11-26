@@ -320,6 +320,12 @@ class AccountService:
             normalized["has_plus_promo"] = bool(item.get("has_plus_promo"))
         if "promo_title" in item:
             normalized["promo_title"] = str(item.get("promo_title") or "")
+        if "has_team_promo" in item:
+            normalized["has_team_promo"] = bool(item.get("has_team_promo"))
+        if "team_promo_title" in item:
+            normalized["team_promo_title"] = str(item.get("team_promo_title") or "")
+        if "team_promo_campaign_id" in item:
+            normalized["team_promo_campaign_id"] = str(item.get("team_promo_campaign_id") or "")
         if "promo_checked_at" in item:
             normalized["promo_checked_at"] = item.get("promo_checked_at") or None
         chat_test_status = str(normalized.get("chat_test_status") or "未测试").strip()
@@ -2015,7 +2021,7 @@ class AccountService:
         return self.update_account(active_token, self._hold_image_cooldown(active_token, result))
 
     def check_plus_trial_eligibility(self, access_token: str) -> dict[str, Any]:
-        """Check and persist a definitive Plus trial eligibility result.
+        """Check and persist definitive Plus and Team trial eligibility results.
 
         Upstream failures are allowed to propagate. In that case this method does
         not update eligibility fields, preserving the last confirmed result.
@@ -2031,18 +2037,24 @@ class AccountService:
 
         backend = OpenAIBackendAPI(active_token)
         try:
-            result = backend.get_plus_trial_eligibility()
+            result = backend.get_trial_eligibilities()
         finally:
             backend.close()
 
-        eligible = bool(result.get("eligible"))
-        title = str(result.get("title") or "") if eligible else ""
+        plus_eligible = bool(result.get("eligible"))
+        plus_title = str(result.get("title") or "") if plus_eligible else ""
+        team_eligible = bool(result.get("team_eligible"))
+        team_title = str(result.get("team_title") or "") if team_eligible else ""
+        team_campaign_id = str(result.get("team_campaign_id") or "") if team_eligible else ""
         checked_at = self._now()
         account = self.update_account(
             active_token,
             {
-                "has_plus_promo": eligible,
-                "promo_title": title,
+                "has_plus_promo": plus_eligible,
+                "promo_title": plus_title,
+                "has_team_promo": team_eligible,
+                "team_promo_title": team_title,
+                "team_promo_campaign_id": team_campaign_id,
                 "promo_checked_at": checked_at,
             },
             quiet=True,
@@ -2052,17 +2064,75 @@ class AccountService:
 
         log_service.add(
             LOG_TYPE_ACCOUNT,
-            "检查 Plus 试用资格",
+            "检查试用资格",
             {
                 "token": anonymize_token(active_token),
-                "eligible": eligible,
+                "plus_eligible": plus_eligible,
+                "team_eligible": team_eligible,
             },
         )
         return {
             "access_token": active_token,
-            "eligible": eligible,
-            "promo_title": title,
+            "eligible": plus_eligible or team_eligible,
+            "plus_eligible": plus_eligible,
+            "promo_title": plus_title,
+            "team_eligible": team_eligible,
+            "team_promo_title": team_title,
+            "team_promo_campaign_id": team_campaign_id,
             "checked_at": checked_at,
+        }
+
+    def create_team_trial_checkout(
+        self,
+        access_token: str,
+        *,
+        workspace_name: str = "MyTeam",
+        seat_quantity: int = 5,
+        currency: str = "USD",
+    ) -> dict[str, Any]:
+        if not access_token:
+            raise ValueError("access_token is required")
+        account = self.get_account(access_token)
+        if account is None:
+            raise ValueError("account not found")
+
+        active_token = self.refresh_access_token(
+            access_token,
+            event="team_trial_checkout:preflight",
+        ) or access_token
+        current_account = self.get_account(active_token) or account
+        promo_campaign_id = str(current_account.get("team_promo_campaign_id") or "").strip() or "team-1-month-free"
+
+        from services.openai_backend_api import OpenAIBackendAPI
+
+        backend = OpenAIBackendAPI(active_token)
+        try:
+            checkout = backend.create_team_trial_checkout(
+                workspace_name=workspace_name,
+                seat_quantity=seat_quantity,
+                currency=currency,
+                promo_campaign_id=promo_campaign_id,
+            )
+        finally:
+            backend.close()
+
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "生成 Team 试用结账链接",
+            {
+                "token": anonymize_token(active_token),
+                "country": checkout.get("country"),
+                "currency": checkout.get("currency"),
+                "promo_campaign_id": checkout.get("promo_campaign_id"),
+            },
+        )
+        return {
+            "access_token": active_token,
+            "url": checkout["url"],
+            "checkout_session_id": checkout.get("checkout_session_id") or "",
+            "country": checkout.get("country") or "",
+            "currency": checkout.get("currency") or "",
+            "promo_campaign_id": checkout.get("promo_campaign_id") or promo_campaign_id,
         }
 
     @staticmethod

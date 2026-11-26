@@ -2,15 +2,16 @@
 
 import { useState, type ReactNode } from "react";
 import { Copy, ExternalLink, Gift, KeyRound, Link2, LoaderCircle, LogIn, Play, Trash2, X } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
-import type { Account, AccountStatus } from "@/lib/api";
+import { createTeamTrialCheckout, type Account, type AccountStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-import { accountType, ago, featureLabel, fullTime, shortToken, STATUS_ORDER, typeTone, until, untilPlain } from "../lib/format";
+import { accountType, ago, copyText, featureLabel, fullTime, shortToken, STATUS_ORDER, typeTone, until, untilPlain } from "../lib/format";
 import { StatusPill, TestChip, type RowActions, type RowBusy } from "./accounts-table";
 
 type AccountDrawerProps = {
@@ -154,10 +155,43 @@ function DrawerBody({
 }: AccountDrawerProps & { account: Account }) {
   const [status, setStatus] = useState<AccountStatus>(account.status);
   const [proxy, setProxy] = useState(account.proxy ?? "");
+  const [workspaceName, setWorkspaceName] = useState("MyTeam");
+  const [seatQuantity, setSeatQuantity] = useState("5");
+  const [currency, setCurrency] = useState("USD");
+  const [creatingCheckout, setCreatingCheckout] = useState(false);
+  const [checkoutUrl, setCheckoutUrl] = useState("");
+  const [checkoutError, setCheckoutError] = useState("");
   const token = account.access_token;
   const dirty = status !== account.status || proxy.trim() !== (account.proxy ?? "").trim();
   const testing = busy.chat.has(token) || busy.realChat.has(token);
   const type = accountType(account);
+
+  const handleGenerateTeamCheckout = async () => {
+    const seats = Math.max(1, Math.min(100, Number.parseInt(seatQuantity, 10) || 5));
+    setCreatingCheckout(true);
+    setCheckoutError("");
+    try {
+      const result = await createTeamTrialCheckout({
+        access_token: token,
+        workspace_name: workspaceName.trim() || "MyTeam",
+        seat_quantity: seats,
+        currency,
+      });
+      setCheckoutUrl(result.url);
+      try {
+        await copyText(result.url);
+        toast.success(`Team 试用结账链接已生成并复制（${result.country}/${result.currency}）`);
+      } catch {
+        toast.success(`Team 试用结账链接已生成（${result.country}/${result.currency}）`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "生成 Team 结账链接失败";
+      setCheckoutError(message);
+      toast.error(message);
+    } finally {
+      setCreatingCheckout(false);
+    }
+  };
 
   return (
     <>
@@ -174,6 +208,12 @@ function DrawerBody({
                 {account.promo_title || "Plus 试用"}
               </span>
             ) : null}
+            {account.has_team_promo ? (
+              <span className="inline-flex h-[22px] items-center gap-1 rounded-full bg-sky-50 px-2 text-xs font-medium text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">
+                <Gift className="size-3.5" />
+                {account.team_promo_title || "Team 试用"}
+              </span>
+            ) : null}
           </div>
         </div>
         <Button variant="ghost" size="icon" className="size-8 rounded-lg" onClick={onClose} title="关闭">
@@ -182,6 +222,104 @@ function DrawerBody({
       </div>
 
       <div className="flex-1 overflow-y-auto px-5 pb-5">
+        {account.has_team_promo || account.has_plus_promo ? (
+          <Section title="试用优惠">
+            {account.has_team_promo ? (
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between gap-2 text-[13px]">
+                  <span className="font-medium text-sky-700 dark:text-sky-300">
+                    {account.team_promo_title || "Try Business free for 1 month"}
+                  </span>
+                  <span className="font-mono text-xs text-stone-400">{account.team_promo_campaign_id || "team-1-month-free"}</span>
+                </div>
+                <div className="grid grid-cols-[1fr_72px_84px] gap-2">
+                  <Input
+                    value={workspaceName}
+                    onChange={(event) => setWorkspaceName(event.target.value)}
+                    placeholder="工作区名称"
+                    className="h-8 rounded-lg border-stone-200 bg-white text-xs"
+                  />
+                  <Input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={seatQuantity}
+                    onChange={(event) => setSeatQuantity(event.target.value)}
+                    title="席位数"
+                    className="h-8 rounded-lg border-stone-200 bg-white text-xs tabular-nums"
+                  />
+                  <Select value={currency} onValueChange={setCurrency}>
+                    <SelectTrigger className="h-8 rounded-lg border-stone-200 bg-white text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="USD">USD</SelectItem>
+                      <SelectItem value="SGD">SGD</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 rounded-lg border-sky-200 bg-sky-50/70 px-3 text-sky-700 hover:bg-sky-100/70 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300"
+                    disabled={creatingCheckout}
+                    onClick={() => void handleGenerateTeamCheckout()}
+                  >
+                    {creatingCheckout ? <LoaderCircle className="size-3.5 animate-spin" /> : <Gift className="size-3.5" />}
+                    生成 Team 试用结账链接
+                  </Button>
+                </div>
+                {checkoutError ? <ErrorBox>{checkoutError}</ErrorBox> : null}
+                {checkoutUrl ? (
+                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-2.5 text-xs">
+                    <div className="mb-2 font-mono break-all text-stone-700 line-clamp-2">{checkoutUrl}</div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 rounded-lg border-stone-200 bg-white px-2.5 text-xs"
+                        onClick={() =>
+                          void copyText(checkoutUrl).then(
+                            () => toast.success("已复制结账链接"),
+                            () => toast.error("复制失败"),
+                          )
+                        }
+                      >
+                        <Copy className="size-3" />
+                        复制链接
+                      </Button>
+                      <a
+                        href={checkoutUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex h-7 items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 text-xs font-medium text-stone-700 hover:bg-stone-100"
+                      >
+                        <ExternalLink className="size-3" />
+                        打开结账页
+                      </a>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {account.has_plus_promo ? (
+              <div className={cn("flex items-center justify-between gap-2 text-[13px]", account.has_team_promo && "mt-3 border-t border-stone-100 pt-3")}>
+                <span className="text-amber-700 dark:text-amber-300">{account.promo_title || "Try Plus free for 1 month"}</span>
+                <a
+                  href="https://chatgpt.com/?promo_campaign=plus-1-month-free#pricing"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg border border-stone-200 bg-white px-2.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                >
+                  <ExternalLink className="size-3" />
+                  官网优惠入口
+                </a>
+              </div>
+            ) : null}
+          </Section>
+        ) : null}
+
         <Section title="额度">
           <QuotaSection account={account} />
         </Section>

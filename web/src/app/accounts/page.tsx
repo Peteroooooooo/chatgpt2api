@@ -311,10 +311,13 @@ function AccountsPageContent() {
       const data = await checkPlusTrialEligibility(tokens);
       applyItems(data.items);
       const eligible = data.results.filter((item) => item.eligible === true).length;
+      const plusCount = data.results.filter((item) => item.plus_eligible === true).length;
+      const teamCount = data.results.filter((item) => item.team_eligible === true).length;
       const ineligible = data.results.filter((item) => item.eligible === false).length;
       const failed = data.results.filter((item) => item.eligible === null).length;
+      const detail = eligible > 0 ? `（Plus ${plusCount}，Team ${teamCount}）` : "";
       toast[failed ? "warning" : "success"](
-        `试用资格检测完成：有资格 ${eligible}，无资格 ${ineligible}${failed ? `，检测失败 ${failed}（保留原标识）` : ""}`,
+        `试用资格检测完成：有资格 ${eligible}${detail}，无资格 ${ineligible}${failed ? `，检测失败 ${failed}（保留原标识）` : ""}`,
       );
     } catch (error) {
       toast.error(errorText(error, "试用资格检测失败"));

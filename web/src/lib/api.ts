@@ -44,6 +44,9 @@ export type Account = {
   has_auto_renewal?: boolean;
   has_plus_promo?: boolean;
   promo_title?: string | null;
+  has_team_promo?: boolean;
+  team_promo_title?: string | null;
+  team_promo_campaign_id?: string | null;
   promo_checked_at?: string | null;
   chat_test_status?: "未测试" | "可用" | "不可用" | "测试失败";
   chat_test_checked_at?: string | null;
@@ -124,9 +127,22 @@ type AccountUpdateResponse = {
 export type PlusTrialEligibilityResult = {
   access_token: string;
   eligible: boolean | null;
+  plus_eligible?: boolean | null;
   promo_title: string;
+  team_eligible?: boolean | null;
+  team_promo_title?: string;
+  team_promo_campaign_id?: string;
   checked_at: string | null;
   error: string | null;
+};
+
+export type TeamTrialCheckoutResponse = {
+  access_token: string;
+  url: string;
+  checkout_session_id: string;
+  country: string;
+  currency: string;
+  promo_campaign_id: string;
 };
 
 type PlusTrialEligibilityResponse = {
@@ -405,6 +421,18 @@ export async function checkPlusTrialEligibility(accessTokens: string[]) {
   return httpRequest<PlusTrialEligibilityResponse>("/api/accounts/plus-trial-eligibility", {
     method: "POST",
     body: { access_tokens: accessTokens },
+  });
+}
+
+export async function createTeamTrialCheckout(payload: {
+  access_token: string;
+  workspace_name?: string;
+  seat_quantity?: number;
+  currency?: string;
+}) {
+  return httpRequest<TeamTrialCheckoutResponse>("/api/accounts/team-trial-checkout", {
+    method: "POST",
+    body: payload,
   });
 }
 

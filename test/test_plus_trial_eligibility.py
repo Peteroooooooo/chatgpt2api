@@ -41,27 +41,41 @@ class MemoryStorage:
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
+    def __init__(self, payload: dict[str, Any], status_code: int = 200, text: str = "") -> None:
         self._payload = payload
         self.status_code = status_code
+        self.text = text
+        self.content = b"{}" if payload else b""
 
     def json(self) -> dict[str, Any]:
         return self._payload
 
 
 class FakeSession:
-    def __init__(self, response: FakeResponse) -> None:
+    def __init__(self, response: FakeResponse, post_response: FakeResponse | None = None, trace_text: str = "loc=SG\n") -> None:
         self.response = response
+        self.post_response = post_response or response
+        self.trace_text = trace_text
+        self.last_post: tuple[tuple[Any, ...], dict[str, Any]] | None = None
 
-    def get(self, *args: Any, **kwargs: Any) -> FakeResponse:
+    def get(self, url: str, *args: Any, **kwargs: Any) -> FakeResponse:
+        if "cdn-cgi/trace" in str(url):
+            return FakeResponse({}, status_code=200, text=self.trace_text)
         return self.response
 
+    def post(self, *args: Any, **kwargs: Any) -> FakeResponse:
+        self.last_post = (args, kwargs)
+        return self.post_response
 
-def make_backend(payload: dict[str, Any]) -> OpenAIBackendAPI:
+
+def make_backend(payload: dict[str, Any], post_payload: dict[str, Any] | None = None) -> OpenAIBackendAPI:
     backend = object.__new__(OpenAIBackendAPI)
     backend.access_token = "test-token"
     backend.base_url = "https://chatgpt.com"
-    backend.session = FakeSession(FakeResponse(payload))
+    backend.session = FakeSession(
+        FakeResponse(payload),
+        post_response=FakeResponse(post_payload) if post_payload is not None else None,
+    )
     backend._headers = lambda *args, **kwargs: {}
     return backend
 
@@ -84,6 +98,59 @@ class PlusTrialEligibilityParsingTests(unittest.TestCase):
 
         self.assertEqual(result, {"eligible": True, "title": "One month free"})
 
+    def test_parses_eligible_team_and_plus_campaigns(self) -> None:
+        backend = make_backend(
+            {
+                "accounts": {
+                    "default": {
+                        "eligible_promo_campaigns": {
+                            "plus": {"id": "plus-1-month-free", "metadata": {"title": "Try Plus free for 1 month"}},
+                            "team": {
+                                "id": "team-1-month-free",
+                                "metadata": {
+                                    "title": "Try Business free for 1 month",
+                                    "promo_campaign_id": "team-1-month-free",
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        )
+
+        result = backend.get_trial_eligibilities()
+
+        self.assertEqual(
+            result,
+            {
+                "eligible": True,
+                "title": "Try Plus free for 1 month",
+                "team_eligible": True,
+                "team_title": "Try Business free for 1 month",
+                "team_campaign_id": "team-1-month-free",
+            },
+        )
+
+    def test_parses_team_only_campaign(self) -> None:
+        backend = make_backend(
+            {
+                "accounts": {
+                    "default": {
+                        "eligible_promo_campaigns": {
+                            "team": {"id": "team-1-month-free", "metadata": {"title": "Try Business free for 1 month"}}
+                        }
+                    }
+                }
+            }
+        )
+
+        result = backend.get_trial_eligibilities()
+
+        self.assertFalse(result["eligible"])
+        self.assertTrue(result["team_eligible"])
+        self.assertEqual(result["team_title"], "Try Business free for 1 month")
+        self.assertEqual(result["team_campaign_id"], "team-1-month-free")
+
     def test_parses_empty_campaigns_as_ineligible(self) -> None:
         backend = make_backend(
             {"accounts": {"default": {"eligible_promo_campaigns": {}}}}
@@ -98,6 +165,33 @@ class PlusTrialEligibilityParsingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "missing eligible_promo_campaigns"):
             backend.get_plus_trial_eligibility()
+
+    def test_create_team_trial_checkout_detects_country_and_returns_url(self) -> None:
+        backend = make_backend(
+            {},
+            post_payload={
+                "tag": "hosted_checkout_session",
+                "checkout_session_id": "cs_live_123",
+                "url": "https://pay.openai.com/c/pay/cs_live_123",
+            },
+        )
+
+        result = backend.create_team_trial_checkout(workspace_name="AcmeTeam", seat_quantity=5, currency="USD")
+
+        self.assertEqual(result["url"], "https://pay.openai.com/c/pay/cs_live_123")
+        self.assertEqual(result["country"], "SG")
+        self.assertEqual(result["currency"], "USD")
+        posted_json = backend.session.last_post[1]["json"]
+        self.assertEqual(posted_json["plan_name"], "chatgptteamplan")
+        self.assertEqual(posted_json["team_plan_data"]["workspace_name"], "AcmeTeam")
+        self.assertEqual(posted_json["billing_details"], {"country": "SG", "currency": "USD"})
+        self.assertEqual(posted_json["promo_campaign"]["promo_campaign_id"], "team-1-month-free")
+
+    def test_create_team_trial_checkout_requires_hosted_url(self) -> None:
+        backend = make_backend({}, post_payload={"tag": "custom_checkout_session", "url": None})
+
+        with self.assertRaisesRegex(RuntimeError, "did not include a hosted url"):
+            backend.create_team_trial_checkout()
 
 
 class ConversationPersistenceTests(unittest.TestCase):
@@ -153,18 +247,25 @@ class PlusTrialEligibilityPersistenceTests(unittest.TestCase):
         service = AccountService(storage)
 
         with patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class:
-            backend_class.return_value.get_plus_trial_eligibility.return_value = {
+            backend_class.return_value.get_trial_eligibilities.return_value = {
                 "eligible": True,
                 "title": "One month free",
+                "team_eligible": True,
+                "team_title": "Try Business free for 1 month",
+                "team_campaign_id": "team-1-month-free",
             }
             result = service.check_plus_trial_eligibility("test-token")
 
         account = service.get_account("test-token")
         self.assertTrue(result["eligible"])
+        self.assertTrue(result["team_eligible"])
         self.assertEqual(account["session_token"], "session-secret")
         self.assertNotIn("sessionToken", account)
         self.assertTrue(account["has_plus_promo"])
         self.assertEqual(account["promo_title"], "One month free")
+        self.assertTrue(account["has_team_promo"])
+        self.assertEqual(account["team_promo_title"], "Try Business free for 1 month")
+        self.assertEqual(account["team_promo_campaign_id"], "team-1-month-free")
 
     def test_failed_check_preserves_last_confirmed_result(self) -> None:
         storage = MemoryStorage(
@@ -174,13 +275,15 @@ class PlusTrialEligibilityPersistenceTests(unittest.TestCase):
                     "refresh_token": "refresh-secret",
                     "has_plus_promo": True,
                     "promo_title": "Confirmed title",
+                    "has_team_promo": True,
+                    "team_promo_title": "Confirmed team title",
                 }
             ]
         )
         service = AccountService(storage)
 
         with patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class:
-            backend_class.return_value.get_plus_trial_eligibility.side_effect = TimeoutError(
+            backend_class.return_value.get_trial_eligibilities.side_effect = TimeoutError(
                 "upstream timeout"
             )
             with self.assertRaises(TimeoutError):
@@ -189,6 +292,39 @@ class PlusTrialEligibilityPersistenceTests(unittest.TestCase):
         account = service.get_account("test-token")
         self.assertTrue(account["has_plus_promo"])
         self.assertEqual(account["promo_title"], "Confirmed title")
+        self.assertTrue(account["has_team_promo"])
+        self.assertEqual(account["team_promo_title"], "Confirmed team title")
+        backend_class.return_value.close.assert_called_once()
+
+    def test_create_team_trial_checkout_uses_saved_campaign_id(self) -> None:
+        storage = MemoryStorage(
+            [
+                {
+                    "access_token": "test-token",
+                    "has_team_promo": True,
+                    "team_promo_campaign_id": "team-custom-promo",
+                }
+            ]
+        )
+        service = AccountService(storage)
+
+        with patch("services.openai_backend_api.OpenAIBackendAPI") as backend_class:
+            backend_class.return_value.create_team_trial_checkout.return_value = {
+                "url": "https://pay.openai.com/c/pay/cs_live_abc",
+                "checkout_session_id": "cs_live_abc",
+                "country": "SG",
+                "currency": "USD",
+                "promo_campaign_id": "team-custom-promo",
+            }
+            result = service.create_team_trial_checkout("test-token", workspace_name="TeamA", seat_quantity=5)
+
+        self.assertEqual(result["url"], "https://pay.openai.com/c/pay/cs_live_abc")
+        backend_class.return_value.create_team_trial_checkout.assert_called_once_with(
+            workspace_name="TeamA",
+            seat_quantity=5,
+            currency="USD",
+            promo_campaign_id="team-custom-promo",
+        )
         backend_class.return_value.close.assert_called_once()
 
     def test_chat_usability_test_persists_independent_status(self) -> None:
@@ -480,6 +616,14 @@ class AccountRouteAuthenticationTests(unittest.TestCase):
         response = self.client.post(
             "/api/accounts/real-chat-test",
             json={"access_tokens": ["test-token"]},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_team_trial_checkout_rejects_unauthenticated_requests(self) -> None:
+        response = self.client.post(
+            "/api/accounts/team-trial-checkout",
+            json={"access_token": "test-token"},
         )
 
         self.assertEqual(response.status_code, 401)

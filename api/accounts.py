@@ -65,6 +65,13 @@ class AccountPromoCheckRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
 
 
+class TeamTrialCheckoutRequest(BaseModel):
+    access_token: str = ""
+    workspace_name: str = "MyTeam"
+    seat_quantity: int = Field(default=5, ge=1, le=100)
+    currency: str = "USD"
+
+
 class AccountChatUsabilityRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
 
@@ -400,7 +407,11 @@ def create_router() -> APIRouter:
                         results[index] = {
                             "access_token": item["access_token"],
                             "eligible": item["eligible"],
+                            "plus_eligible": item["plus_eligible"],
                             "promo_title": item["promo_title"],
+                            "team_eligible": item["team_eligible"],
+                            "team_promo_title": item["team_promo_title"],
+                            "team_promo_campaign_id": item["team_promo_campaign_id"],
                             "checked_at": item["checked_at"],
                             "error": None,
                         }
@@ -408,7 +419,11 @@ def create_router() -> APIRouter:
                         results[index] = {
                             "access_token": requested_token,
                             "eligible": None,
+                            "plus_eligible": None,
                             "promo_title": "",
+                            "team_eligible": None,
+                            "team_promo_title": "",
+                            "team_promo_campaign_id": "",
                             "checked_at": None,
                             "error": str(exc)[:200],
                         }
@@ -419,6 +434,31 @@ def create_router() -> APIRouter:
             "results": results,
             "items": _account_views(account_service.list_accounts()),
         }
+
+    @router.post("/api/accounts/team-trial-checkout")
+    async def create_team_trial_checkout(
+            body: TeamTrialCheckoutRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        access_token = str(body.access_token or "").strip()
+        if not access_token:
+            raise HTTPException(status_code=400, detail={"error": "access_token is required"})
+        try:
+            return await run_in_threadpool(
+                lambda: account_service.create_team_trial_checkout(
+                    access_token,
+                    workspace_name=body.workspace_name,
+                    seat_quantity=body.seat_quantity,
+                    currency=body.currency,
+                )
+            )
+        except ValueError as exc:
+            message = str(exc)
+            status_code = 404 if message == "account not found" else 400
+            raise HTTPException(status_code=status_code, detail={"error": message}) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": str(exc)[:300]}) from exc
 
     @router.post("/api/accounts/chat-usability")
     async def test_chat_usability(

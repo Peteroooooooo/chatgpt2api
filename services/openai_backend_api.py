@@ -330,8 +330,22 @@ class OpenAIBackendAPI:
         })
         return default_account
 
-    def get_plus_trial_eligibility(self) -> Dict[str, Any]:
-        """Return a definitive Plus trial eligibility result for this account.
+    @staticmethod
+    def _extract_promo_campaign(campaigns: Dict[str, Any], key: str, default_title: str) -> tuple[bool, str, str]:
+        campaign = campaigns.get(key)
+        if campaign is not None and not isinstance(campaign, dict):
+            raise RuntimeError(f"eligible_promo_campaigns.{key} is not an object")
+        eligible = bool(campaign)
+        if not eligible:
+            return False, "", ""
+        metadata = campaign.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        title = str(metadata.get("title") or default_title)
+        campaign_id = str(campaign.get("id") or metadata.get("promo_campaign_id") or "")
+        return True, title, campaign_id
+
+    def get_trial_eligibilities(self) -> Dict[str, Any]:
+        """Return definitive Plus and Team trial eligibility results for this account.
 
         A missing or malformed eligibility node is treated as an upstream error,
         not as an ineligible account. This distinction prevents transient API or
@@ -360,15 +374,101 @@ class OpenAIBackendAPI:
         campaigns = default_account.get("eligible_promo_campaigns")
         if not isinstance(campaigns, dict):
             raise RuntimeError("eligible_promo_campaigns is not an object")
-        plus_campaign = campaigns.get("plus")
-        if plus_campaign is not None and not isinstance(plus_campaign, dict):
-            raise RuntimeError("eligible_promo_campaigns.plus is not an object")
 
-        eligible = bool(plus_campaign)
-        metadata = plus_campaign.get("metadata") if eligible else None
-        metadata = metadata if isinstance(metadata, dict) else {}
-        title = str(metadata.get("title") or "1-month free trial") if eligible else ""
-        return {"eligible": eligible, "title": title}
+        plus_eligible, plus_title, _ = self._extract_promo_campaign(campaigns, "plus", "1-month free trial")
+        team_eligible, team_title, team_campaign_id = self._extract_promo_campaign(
+            campaigns,
+            "team",
+            "Try Business free for 1 month",
+        )
+        return {
+            "eligible": plus_eligible,
+            "title": plus_title,
+            "team_eligible": team_eligible,
+            "team_title": team_title,
+            "team_campaign_id": team_campaign_id,
+        }
+
+    def get_plus_trial_eligibility(self) -> Dict[str, Any]:
+        result = self.get_trial_eligibilities()
+        return {"eligible": bool(result.get("eligible")), "title": str(result.get("title") or "")}
+
+    def _detect_request_country(self) -> str:
+        try:
+            response = self.session.get(f"{self.base_url}/cdn-cgi/trace", timeout=10)
+            if response.status_code == 200:
+                for line in response.text.splitlines():
+                    if line.startswith("loc="):
+                        code = line[4:].strip().upper()
+                        if len(code) == 2 and code.isalpha() and code != "XX":
+                            return code
+        except Exception:
+            pass
+        return "SG"
+
+    def create_team_trial_checkout(
+        self,
+        *,
+        workspace_name: str = "MyTeam",
+        seat_quantity: int = 5,
+        price_interval: str = "month",
+        currency: str = "USD",
+        country: str = "",
+        promo_campaign_id: str = "team-1-month-free",
+    ) -> Dict[str, Any]:
+        if not self.access_token:
+            raise RuntimeError("access_token is required")
+        seats = int(seat_quantity)
+        if seats < 1 or seats > 100:
+            raise ValueError("seat_quantity must be between 1 and 100")
+        interval = str(price_interval or "month").strip().lower()
+        if interval not in {"month", "year"}:
+            raise ValueError("price_interval must be month or year")
+
+        billing_country = (country or "").strip().upper() or self._detect_request_country()
+        billing_currency = (currency or "USD").strip().upper() or "USD"
+        campaign_id = (promo_campaign_id or "team-1-month-free").strip() or "team-1-month-free"
+        ws_name = (workspace_name or "MyTeam").strip() or "MyTeam"
+
+        path = "/backend-api/payments/checkout"
+        headers = dict(self._headers(path))
+        headers["Content-Type"] = "application/json"
+        body = {
+            "entry_point": "team_workspace_purchase_modal",
+            "plan_name": "chatgptteamplan",
+            "team_plan_data": {
+                "workspace_name": ws_name,
+                "price_interval": interval,
+                "seat_quantity": seats,
+            },
+            "billing_details": {
+                "country": billing_country,
+                "currency": billing_currency,
+            },
+            "cancel_url": f"{self.base_url}/#pricing",
+            "checkout_ui_mode": "hosted",
+            "promo_campaign": {
+                "promo_campaign_id": campaign_id,
+                "is_coupon_from_query_param": False,
+            },
+        }
+        response = self.session.post(self.base_url + path, headers=headers, json=body, timeout=20)
+        if response.status_code != 200:
+            self._raise_on_error(response, path)
+
+        payload = response.json() if response.content else {}
+        if not isinstance(payload, dict):
+            raise RuntimeError("team trial checkout response is not an object")
+        url = str(payload.get("url") or "").strip()
+        if not url:
+            raise RuntimeError("team trial checkout response did not include a hosted url")
+        return {
+            "url": url,
+            "checkout_session_id": str(payload.get("checkout_session_id") or ""),
+            "country": billing_country,
+            "currency": billing_currency,
+            "promo_campaign_id": campaign_id,
+        }
 
     def get_user_info(self) -> Dict[str, Any]:
         """获取当前 token 的账号信息。"""
