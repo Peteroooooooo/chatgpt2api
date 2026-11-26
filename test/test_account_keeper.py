@@ -389,6 +389,181 @@ class KeeperTests(unittest.TestCase):
             time.sleep(1.01)
         self.assertEqual([run["id"] for run in keeper.list_runs()], ids[:0:-1])
 
+    def test_auto_generated_signup_password_is_saved_and_used_for_login(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        service.unregistered = {"new@040601.xyz"}
+        service.signup_result = {"ok": True, "created": True, "password_set": True, "password": "GenPassword!1"}
+        passwords = []
+        original = service._login_with_password
+        service._login_with_password = lambda email, password, wait=0: passwords.append(password) or original(email, password, wait)
+        result = service.login_and_add_account("new@040601.xyz")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["registered"])
+        self.assertEqual(passwords, ["", "GenPassword!1"])
+        account = service.get_account(service.find_token_by_email("new@040601.xyz"))
+        self.assertEqual(account["password"], "GenPassword!1")
+
+    def test_register_settings_defaults_and_text_preservation(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        keeper = self.keeper(service)
+        defaults = keeper.get_settings()
+        self.assertEqual(defaults["auto_register_interval_minutes"], 60)
+        self.assertFalse(defaults["auto_register_enabled"])
+        updated = keeper.update_settings({
+            "auto_register_enabled": True,
+            "auto_register_time": "3:5",
+            "auto_register_domain": "040601.xyz, 040601.com",
+            "auto_register_prefix": "auto",
+            "auto_register_interval_minutes": 45,
+        })
+        self.assertEqual(updated["auto_register_time"], "03:05")
+        self.assertEqual(updated["auto_register_domain"], "040601.xyz, 040601.com")
+        self.assertEqual(updated["auto_register_prefix"], "auto")
+        self.assertEqual(updated["auto_register_interval_minutes"], 45)
+
+    def test_run_register_respects_normal_account_cap_and_interval(self):
+        existing = [
+            {"access_token": token("n1"), "email": "n1@040601.xyz", "status": "正常"},
+            {"access_token": token("n2"), "email": "n2@040601.xyz", "status": "异常"},
+        ]
+        service = PatrolService(existing, routed_domain="040601.xyz")
+        service.signup_result = {"ok": True, "created": True, "password_set": False}
+        original_login = service._login_with_password
+
+        def always_new_then_login(email, password, wait=0):
+            if email not in [a.get("email") for a in service.list_accounts()] and not any(s[0] == email for s in service.signups):
+                return {"ok": False, "error": "account_not_registered"}
+            return original_login(email, password, wait)
+
+        service._login_with_password = always_new_then_login
+        keeper = self.keeper(service)
+        waits = []
+        keeper._register_wait = lambda secs: waits.append(secs) or False
+        keeper.update_settings({
+            "auto_register_domain": "040601.xyz",
+            "auto_register_prefix": "daily",
+            "auto_register_daily_count": 3,
+            "auto_register_interval_minutes": 60,
+            "auto_register_max_normal_accounts": 3,
+        })
+        summary = keeper.run_register("manual")
+        self.assertEqual(summary["state"], "finished")
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["counts"], {"registered": 2})
+        self.assertEqual(waits, [3600])
+        self.assertTrue(all(email.startswith("daily_") and email.endswith("@040601.xyz") for email, _ in service.signups))
+
+        summary2 = keeper.run_register("manual")
+        self.assertEqual(summary2["total"], 0)
+        self.assertIn("已达上限", summary2["skip_reason"])
+
+    def test_run_register_fuses_on_rate_limit_and_consecutive_failures(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        service._login_with_password = lambda email, pw, wait=0: {"ok": False, "error": "rate_limit_exceeded"}
+        keeper = self.keeper(service)
+        keeper._register_wait = lambda _: False
+        keeper.update_settings({
+            "auto_register_domain": "040601.xyz",
+            "auto_register_daily_count": 5,
+            "auto_register_max_normal_accounts": 0,
+        })
+        summary = keeper.run_register("manual")
+        self.assertEqual(summary["done"], 1)
+        self.assertIn("rate_limit_exceeded", summary["stopped_reason"])
+
+        service2 = PatrolService([], routed_domain="040601.xyz")
+        service2._login_with_password = lambda email, pw, wait=0: {"ok": False, "error": "otp_not_received"}
+        keeper2 = self.keeper(service2)
+        keeper2._register_wait = lambda _: False
+        keeper2.update_settings({
+            "auto_register_domain": "040601.xyz",
+            "auto_register_daily_count": 5,
+            "auto_register_max_normal_accounts": 0,
+        })
+        summary2 = keeper2.run_register("manual")
+        self.assertEqual(summary2["done"], 2)
+        self.assertIn("连续失败 2 次", summary2["stopped_reason"])
+
+    def test_run_register_stops_during_interval_wait(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        keeper = self.keeper(service)
+        keeper.update_settings({
+            "auto_register_domain": "040601.xyz",
+            "auto_register_daily_count": 3,
+            "auto_register_interval_minutes": 60,
+            "auto_register_max_normal_accounts": 0,
+        })
+        keeper._register_wait = lambda _: True
+        summary = keeper.run_register("manual")
+        self.assertEqual(summary["done"], 1)
+        self.assertEqual(summary["stopped_reason"], "已手动停止")
+
+    def test_manual_register_overrides_do_not_mutate_schedule_settings(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        service.has_mailbox_route = lambda email: email.endswith(("@040601.xyz", "@peteroooooooo.com"))
+        service.signup_result = {
+            "ok": True,
+            "created": True,
+            "password_set": False,
+            "access_token": token("manual-override"),
+            "refresh_token": "rt-override",
+            "id_token": "",
+        }
+        keeper = self.keeper(service)
+        keeper.update_settings({
+            "auto_register_domain": "040601.xyz",
+            "auto_register_daily_count": 3,
+            "auto_register_interval_minutes": 60,
+        })
+        summary = keeper.run_register("manual", overrides={
+            "domain": "peteroooooooo.com",
+            "prefix": "tmp",
+            "count": 1,
+            "interval_minutes": 0,
+        })
+        self.assertEqual(summary["domain"], "peteroooooooo.com")
+        self.assertEqual(summary["done"], 1)
+        self.assertEqual(summary["counts"], {"registered": 1})
+        self.assertEqual(service.signups[0][0].split("@")[1], "peteroooooooo.com")
+        self.assertTrue(service.signups[0][0].startswith("tmp_"))
+        saved = keeper.get_settings()
+        self.assertEqual(saved["auto_register_domain"], "040601.xyz")
+        self.assertEqual(saved["auto_register_daily_count"], 3)
+        self.assertEqual(saved["auto_register_interval_minutes"], 60)
+
+    def test_manual_register_with_explicit_emails(self):
+        service = PatrolService([], routed_domain="duck.com")
+        service.unregistered = {"custom1@duck.com", "custom2@duck.com"}
+        keeper = self.keeper(service)
+        summary = keeper.run_register("manual", overrides={
+            "emails": "custom1@duck.com\ncustom2@duck.com",
+            "interval_minutes": 0,
+        })
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["counts"], {"registered": 2})
+        self.assertEqual(summary["emails"], ["custom1@duck.com", "custom2@duck.com"])
+        self.assertEqual([email for email, _ in service.signups], ["custom1@duck.com", "custom2@duck.com"])
+
+    def test_browser_signup_tokens_skip_second_login(self):
+        service = PatrolService([], routed_domain="040601.xyz")
+        service.unregistered = {"browser@040601.xyz"}
+        service.signup_result = {
+            "ok": True,
+            "created": True,
+            "password_set": False,
+            "access_token": token("browser@040601.xyz"),
+            "refresh_token": "rt-browser",
+            "id_token": "id-browser",
+            "session_token": "sess-browser",
+        }
+        result = service.login_and_add_account("browser@040601.xyz")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["registered"])
+        self.assertEqual(service.logins, ["browser@040601.xyz"])
+        account = service.get_account(service.find_token_by_email("browser@040601.xyz"))
+        self.assertEqual(account["refresh_token"], "rt-browser")
+        self.assertEqual(account["session_token"], "sess-browser")
+
 
 if __name__ == "__main__":
     unittest.main()

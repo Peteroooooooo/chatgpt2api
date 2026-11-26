@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Body, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from api.support import require_admin
@@ -23,6 +23,14 @@ class MailboxResolveRequest(BaseModel):
 
 class PasswordImportRequest(BaseModel):
     text: str = ""
+
+
+class RegisterRunRequest(BaseModel):
+    domain: str | None = None
+    prefix: str | None = None
+    count: int | None = None
+    interval_minutes: int | None = None
+    emails: list[str] | str | None = None
 
 
 def create_router() -> APIRouter:
@@ -63,13 +71,21 @@ def create_router() -> APIRouter:
     @router.get("/api/keeper/settings")
     async def get_keeper_settings(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {**account_keeper.get_settings(), "next_run_at": account_keeper.next_run_at().isoformat()}
+        return {
+            **account_keeper.get_settings(),
+            "next_run_at": account_keeper.next_run_at().isoformat(),
+            "next_register_at": account_keeper.next_register_run_at().isoformat(),
+        }
 
     @router.post("/api/keeper/settings")
     async def save_keeper_settings(body: dict[str, Any], authorization: str | None = Header(default=None)):
         require_admin(authorization)
         settings = account_keeper.update_settings(body or {})
-        return {**settings, "next_run_at": account_keeper.next_run_at().isoformat()}
+        return {
+            **settings,
+            "next_run_at": account_keeper.next_run_at().isoformat(),
+            "next_register_at": account_keeper.next_register_run_at().isoformat(),
+        }
 
     @router.post("/api/keeper/patrol/run")
     async def run_patrol(authorization: str | None = Header(default=None)):
@@ -89,6 +105,33 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=404, detail={"error": "run not found"})
         return run
 
+    @router.post("/api/keeper/register/run")
+    async def run_auto_register(
+        body: RegisterRunRequest | None = Body(default=None),
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        overrides = body.model_dump(exclude_none=True) if body is not None else None
+        return account_keeper.start_register("manual", overrides=overrides)
+
+    @router.post("/api/keeper/register/stop")
+    async def stop_auto_register(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return account_keeper.stop_register()
+
+    @router.get("/api/keeper/register/runs")
+    async def list_register_runs(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"items": account_keeper.list_register_runs()}
+
+    @router.get("/api/keeper/register/runs/{run_id}")
+    async def get_register_run(run_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        run = account_keeper.get_register_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail={"error": "run not found"})
+        return run
+
     @router.post("/api/keeper/import-passwords")
     async def import_passwords(body: PasswordImportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -96,6 +139,11 @@ def create_router() -> APIRouter:
         if not job["total"]:
             raise HTTPException(status_code=400, detail={"error": "没有识别到邮箱（每行一个邮箱，或 邮箱----密码）"})
         return job
+
+    @router.get("/api/keeper/jobs/latest")
+    async def get_latest_job(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"job": account_keeper.get_latest_job()}
 
     @router.get("/api/keeper/jobs/{job_id}")
     async def get_job(job_id: str, authorization: str | None = Header(default=None)):

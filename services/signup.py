@@ -7,15 +7,66 @@ then logs in with the usual Platform login to get a refresh token.
 """
 from __future__ import annotations
 
+import secrets
+import string
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urljoin, urlparse
 
 from services.login_otp import AUTH_BASE, follow_to_auth_code, validate_code_from_mail
 from services.login_profile import complete_about_you, is_about_you_url
 from services.mailbox.base import MailboxError
+from services.openai_session_service import is_cloudflare_challenge
 from utils.browser_profile import SEC_CH_UA, SEC_CH_UA_MOBILE, SEC_CH_UA_PLATFORM, USER_AGENT
 
 CHATGPT_BASE = "https://chatgpt.com"
+
+
+def generate_strong_password(length: int = 16) -> str:
+    """Generate a random password meeting OpenAI complexity rules."""
+    length = max(12, length)
+    lowers = string.ascii_lowercase
+    uppers = string.ascii_uppercase
+    digits = string.digits
+    symbols = "!@#$%^&*-_"
+    pool = lowers + uppers + digits + symbols
+    chars = [
+        secrets.choice(lowers),
+        secrets.choice(uppers),
+        secrets.choice(digits),
+        secrets.choice(symbols),
+        *(secrets.choice(pool) for _ in range(length - 4)),
+    ]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
+def _sync_clearance_cookies(session, bundle) -> None:
+    if bundle is None or not getattr(bundle, "cookies", None):
+        return
+    cookies = getattr(session, "cookies", None)
+    setter = getattr(cookies, "set", None)
+    if not callable(setter):
+        return
+    for name, value in bundle.cookies.items():
+        try:
+            setter(name, value, domain=".chatgpt.com")
+        except TypeError:
+            setter(name, value)
+
+
+def _chatgpt_request(session, method: str, url: str, *, headers: dict, clearance=None, **kwargs):
+    fn = session.post if method.upper() == "POST" else session.get
+    if clearance is None:
+        return fn(url, headers=headers, **kwargs)
+    for attempt in range(2):
+        req_headers = clearance.build_headers(headers, target_url=url, upstream=True)
+        resp = fn(url, headers=req_headers, **kwargs)
+        if resp.status_code == 403 and is_cloudflare_challenge(resp) and attempt == 0:
+            bundle = clearance.refresh_clearance(target_url=CHATGPT_BASE, force=True, upstream=True)
+            _sync_clearance_cookies(session, bundle)
+            continue
+        return resp
+    return resp
 
 
 def _json(response) -> dict:
@@ -40,14 +91,15 @@ def _path(url: str) -> str:
     return urlparse(str(url)).path.rstrip("/")
 
 
-def register_account(session, email: str, password: str, mailbox, *, sentinel) -> dict:
+def register_account(session, email: str, password: str, mailbox, *, sentinel, clearance=None) -> dict:
     """Create the ChatGPT account when the email has none yet.
 
     sentinel(device_id, flow) -> (token, oai_sc_cookie).
-    Returns {"ok": True, "created": True, "password_set": bool} after sign-up
-    (OpenAI decides whether the form asks for a password; without one the
-    account logs in with email codes), {"ok": True, "created": False} when the
-    email already has an account, or {"ok": False, "error": ..., "detail": ...}.
+    Returns {"ok": True, "created": True, "password_set": bool, ...} after sign-up
+    (OpenAI decides whether the form asks for a password; when asked without a
+    provided password a strong one is generated and returned in "password"),
+    {"ok": True, "created": False} when the email already has an account, or
+    {"ok": False, "error": ..., "detail": ...}.
     """
     nav = {
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -60,17 +112,22 @@ def register_account(session, email: str, password: str, mailbox, *, sentinel) -
         "sec-fetch-mode": "navigate",
         "upgrade-insecure-requests": "1",
     }
-    session.get(f"{CHATGPT_BASE}/auth/login", headers={**nav, "sec-fetch-site": "none"}, timeout=30)
-    csrf_resp = session.get(
+    _chatgpt_request(session, "GET", f"{CHATGPT_BASE}/auth/login", headers={**nav, "sec-fetch-site": "none"}, clearance=clearance, timeout=30)
+    csrf_resp = _chatgpt_request(
+        session,
+        "GET",
         f"{CHATGPT_BASE}/api/auth/csrf",
         headers={"accept": "application/json", "user-agent": USER_AGENT, "referer": f"{CHATGPT_BASE}/auth/login"},
+        clearance=clearance,
         timeout=30,
     )
     csrf = str(_json(csrf_resp).get("csrfToken") or "")
     if not csrf:
         return _error(csrf_resp, "signup_csrf_failed")
     query = urlencode({"prompt": "login", "screen_hint": "login_or_signup", "login_hint": email})
-    signin_resp = session.post(
+    signin_resp = _chatgpt_request(
+        session,
+        "POST",
         f"{CHATGPT_BASE}/api/auth/signin/openai?{query}",
         headers={
             "accept": "*/*",
@@ -79,6 +136,7 @@ def register_account(session, email: str, password: str, mailbox, *, sentinel) -
             "referer": f"{CHATGPT_BASE}/auth/login",
             "user-agent": USER_AGENT,
         },
+        clearance=clearance,
         data=urlencode({"callbackUrl": f"{CHATGPT_BASE}/", "csrfToken": csrf, "json": "true"}),
         timeout=30,
     )
@@ -110,9 +168,10 @@ def register_account(session, email: str, password: str, mailbox, *, sentinel) -
         "oai-device-id": device_id,
     }
 
+    used_password = password
     if landed == "/create-account/password":
-        if not password:
-            return {"ok": False, "error": "signup_password_required", "detail": {"page": landed}}
+        if not used_password:
+            used_password = generate_strong_password()
         headers = {**api, "referer": f"{AUTH_BASE}/create-account/password"}
         try:
             token, cookie = sentinel(device_id, "username_password_create")
@@ -124,7 +183,7 @@ def register_account(session, email: str, password: str, mailbox, *, sentinel) -
         register_resp = session.post(
             f"{AUTH_BASE}/api/accounts/user/register",
             headers=headers,
-            json={"password": password, "username": email},
+            json={"password": used_password, "username": email},
             timeout=30,
         )
         if register_resp.status_code != 200:
@@ -179,8 +238,19 @@ def register_account(session, email: str, password: str, mailbox, *, sentinel) -
         return {"ok": False, "error": "signup_no_auth_code", "detail": {"last_url": last_url[:300], "page": page.get("type")}}
     # Finish the chatgpt.com sign-in like the browser does.
     try:
-        session.get(last_url, headers={**nav, "sec-fetch-site": "same-site", "referer": f"{AUTH_BASE}/"}, allow_redirects=True, timeout=30)
+        _chatgpt_request(
+            session,
+            "GET",
+            last_url,
+            headers={**nav, "sec-fetch-site": "same-site", "referer": f"{AUTH_BASE}/"},
+            clearance=clearance,
+            allow_redirects=True,
+            timeout=30,
+        )
     except Exception:
         pass
     password_set = landed == "/create-account/password"
-    return {"ok": True, "created": created or password_set, "password_set": password_set}
+    result = {"ok": True, "created": created or password_set, "password_set": password_set}
+    if password_set and not password:
+        result["password"] = used_password
+    return result

@@ -133,6 +133,21 @@ class RouteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.update_settings({"providers": {}, "routes": [{"match": "a.com", "provider": "nope"}]})
 
+    def test_allow_register_defaults_and_persistence(self):
+        self.assertEqual(self.service.registerable_domains(), ["040601.com", "peter.com"])
+        public = self.service.public_settings()
+        by_match = {r["match"]: r for r in public["routes"]}
+        self.assertTrue(by_match["040601.com"]["allow_register"])
+        self.assertTrue(by_match["peter.com"]["allow_register"])
+        self.assertFalse(by_match["duck.com"]["allow_register"])
+        self.assertFalse(by_match["vip@peter.com"]["allow_register"])
+        self.assertFalse(by_match["*"]["allow_register"])
+
+        by_match["peter.com"]["allow_register"] = False
+        self.service.update_settings(public)
+        reloaded = MailboxService(self.service.path, env_config=EMPTY_ENV)
+        self.assertEqual(reloaded.registerable_domains(), ["040601.com"])
+
 
 if __name__ == "__main__":
     unittest.main()

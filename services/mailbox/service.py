@@ -21,6 +21,51 @@ PROVIDER_CLASSES: dict[str, type[MailboxProvider]] = {
 SECRET_FIELDS = {"admin_password", "site_password", "client_secret", "refresh_token", "password"}
 DEFAULTS = {"otp_timeout_seconds": 180, "poll_interval_seconds": 5}
 USED_CODE_SECONDS = 15 * 60
+NON_REGISTERABLE_DOMAINS = frozenset({
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "msn.com",
+    "qq.com",
+    "foxmail.com",
+    "163.com",
+    "126.com",
+    "yeah.net",
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    "yahoo.com",
+    "ymail.com",
+    "proton.me",
+    "protonmail.com",
+    "pm.me",
+    "duck.com",
+    "mozmail.com",
+    "relay.firefox.com",
+})
+
+
+def default_allow_register(match: str) -> bool:
+    clean = str(match or "").strip().lower().lstrip("@")
+    if not clean or clean == "*" or "@" in clean or "." not in clean:
+        return False
+    return clean not in NON_REGISTERABLE_DOMAINS
+
+
+def _normalize_route(route: dict) -> dict | None:
+    if not isinstance(route, dict):
+        return None
+    match = str(route.get("match") or route.get("domain") or "").strip().lower()
+    provider = str(route.get("provider") or "").strip()
+    if not match or not provider:
+        return None
+    allow = route["allow_register"] if "allow_register" in route else default_allow_register(match)
+    normalized = {"match": match, "provider": provider, "allow_register": bool(allow)}
+    if route.get("source"):
+        normalized["source"] = route["source"]
+    return normalized
 
 
 def _domain_matches(domain: str, rule: str) -> bool:
@@ -60,14 +105,16 @@ class MailboxService:
 
     def _merge(self) -> dict:
         if self._file.get("env_imported"):
-            merged = {"providers": copy.deepcopy(self._file["providers"]), "routes": copy.deepcopy(self._file["routes"])}
+            raw_routes = copy.deepcopy(self._file["routes"])
+            merged = {"providers": copy.deepcopy(self._file["providers"]), "routes": [r for item in raw_routes if (r := _normalize_route(item))]}
             for key, default in DEFAULTS.items():
                 merged[key] = self._file.get(key, default)
             return merged
         env_providers = self._env.get("providers") or {}
+        raw_routes = [*copy.deepcopy(self._env.get("routes") or []), *copy.deepcopy(self._file["routes"])]
         merged = {
             "providers": {**self._file["providers"], **copy.deepcopy(env_providers)},
-            "routes": [*copy.deepcopy(self._env.get("routes") or []), *copy.deepcopy(self._file["routes"])],
+            "routes": [r for item in raw_routes if (r := _normalize_route(item))],
         }
         for key, default in DEFAULTS.items():
             merged[key] = self._env.get(key, self._file.get(key, default))
@@ -137,16 +184,21 @@ class MailboxService:
             routes: list[dict] = []
             seen: set[tuple[str, str]] = set()
             for route in incoming.get("routes") or []:
-                if not isinstance(route, dict):
+                normalized = _normalize_route(route)
+                if not normalized:
                     continue
-                match = str(route.get("match") or route.get("domain") or "").strip().lower()
-                provider = str(route.get("provider") or "").strip()
-                if not match or not provider or (match, provider) in seen:
+                match = normalized["match"]
+                provider = normalized["provider"]
+                if (match, provider) in seen:
                     continue
                 if provider not in known:
                     raise ValueError(f"route '{match}' points to unknown mailbox '{provider}'")
                 seen.add((match, provider))
-                routes.append({"match": match, "provider": provider})
+                routes.append({
+                    "match": match,
+                    "provider": provider,
+                    "allow_register": bool(normalized["allow_register"]),
+                })
             next_file = {"providers": providers, "routes": routes, "env_imported": True}
             for key, default in DEFAULTS.items():
                 try:
@@ -172,6 +224,18 @@ class MailboxService:
             instance = cls(name, settings)
             self._instances[name] = instance
         return instance
+
+    def registerable_domains(self) -> list[str]:
+        with self._lock:
+            routes = list(self._data.get("routes") or [])
+        domains: list[str] = []
+        for route in routes:
+            if not route.get("allow_register"):
+                continue
+            match = str(route.get("match") or "").strip().lower().lstrip("@")
+            if match and match != "*" and "@" not in match and "." in match and match not in domains:
+                domains.append(match)
+        return domains
 
     def resolve(self, address: str) -> MailboxProvider | None:
         address = str(address or "").strip().lower()

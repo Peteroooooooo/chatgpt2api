@@ -2542,7 +2542,7 @@ class AccountService:
         except Exception:
             return False
 
-    def login_and_add_account(self, email: str, password: str = "") -> dict:
+    def login_and_add_account(self, email: str, password: str = "", *, prefer_browser: bool = False) -> dict:
         """Log in and add or update the account. Without a password the login uses an email code."""
         email = str(email or "").strip()
         # Passwords are kept exactly as typed: leading or trailing spaces can be part of them.
@@ -2571,43 +2571,64 @@ class AccountService:
             ok = account.get("status") == "正常" and not account.get("last_relogin_error")
             return {"ok": ok, "email": email, "updated": True, "error": account.get("last_relogin_error")}
         typed_password = password
-        result = self._login_with_password(email, password, self.push_auth_wait_seconds)
-        # An account created without a password answers a password login like a new email
-        # (account_not_registered) or with password_not_set; an email code logs it in. For a
-        # really new email the code login stops at the sign-up page before any mail is sent.
-        fallback_errors = ("password_not_set", "account_not_registered", "password_step_rejected")
-        if password and not result.get("ok") and result.get("error") in fallback_errors and self.has_mailbox_route(email):
-            password = ""
-            result = self._login_with_password(email, "", self.push_auth_wait_seconds)
+        if prefer_browser:
+            from services.browser_signup import is_browser_signup_available
+
+            if is_browser_signup_available():
+                result: dict = {"ok": False, "error": "account_not_registered"}
+            else:
+                result = self._login_with_password(email, password, self.push_auth_wait_seconds)
+        else:
+            result = self._login_with_password(email, password, self.push_auth_wait_seconds)
+            # An account created without a password answers a password login like a new email
+            # (account_not_registered) or with password_not_set; an email code logs it in. For a
+            # really new email the code login stops at the sign-up page before any mail is sent.
+            fallback_errors = ("password_not_set", "account_not_registered", "password_step_rejected")
+            if password and not result.get("ok") and result.get("error") in fallback_errors and self.has_mailbox_route(email):
+                password = ""
+                result = self._login_with_password(email, "", self.push_auth_wait_seconds)
         signup: dict = {}
         if result.get("error") == "account_not_registered":
-            # Only a new email reaches this: register it through chatgpt.com, then log in normally.
+            # Only a new email reaches this: register via real browser (or fallback), then reuse returned tokens if present.
             signup = self._register_if_new(email, typed_password)
             if not signup.get("ok"):
                 return {"ok": False, "email": email, "error": signup.get("error"), "detail": signup.get("detail")}
             # OpenAI decides whether sign-up asks for a password; without one a stored password would only fail later.
-            password = typed_password if signup.get("password_set") else ""
-            result = self._login_with_password(email, password, self.push_auth_wait_seconds)
+            password = str(signup.get("password") or typed_password) if signup.get("password_set") else ""
+            if signup.get("access_token"):
+                result = signup
+            else:
+                result = self._login_with_password(email, password, self.push_auth_wait_seconds)
         if not result.get("ok"):
             return {"ok": False, "email": email, "error": result.get("error"), "detail": result.get("detail"), "registered": bool(signup.get("created"))}
         token = str(result.get("access_token") or "")
-        self.add_account_items([{
+        item_payload = {
             "access_token": token,
             "refresh_token": result.get("refresh_token") or "",
             "id_token": result.get("id_token") or "",
             "email": result.get("email") or email,
             "password": password,
             "source_type": "password",
-        }])
+        }
+        if result.get("session_token"):
+            item_payload["session_token"] = result["session_token"]
+        self.add_account_items([item_payload])
         self.refresh_accounts([token])
         return {"ok": True, "email": email, "added": True, "registered": bool(signup.get("created"))}
 
     def _register_if_new(self, email: str, password: str) -> dict:
-        """Create the ChatGPT account through chatgpt.com when the email has none yet."""
-        from curl_cffi import requests
-
+        """Create the ChatGPT account through real browser first, falling back to protocol signup."""
+        from services.browser_signup import is_browser_signup_available, register_via_browser
         from services.mailbox.service import mailbox_service
         from services.proxy_service import proxy_settings
+
+        if is_browser_signup_available():
+            session_kwargs = proxy_settings.build_session_kwargs(upstream=True)
+            proxy_url = str(session_kwargs.get("proxy") or "").strip()
+            return register_via_browser(email, password, mailbox_service, proxy_url=proxy_url)
+
+        from curl_cffi import requests
+
         from services.signup import register_account
         from utils.sentinel import build_sentinel_token
 
@@ -2621,6 +2642,7 @@ class AccountService:
                 password,
                 mailbox_service,
                 sentinel=lambda device_id, flow: build_sentinel_token(session, device_id, flow, solve_turnstile=True),
+                clearance=proxy_settings,
             )
         except Exception as exc:
             return {"ok": False, "error": "signup_failed", "detail": {"reason": str(exc)}}

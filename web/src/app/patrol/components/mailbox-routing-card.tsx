@@ -103,6 +103,7 @@ type RouteRow = {
   key: string;
   match: string;
   provider: string;
+  allow_register: boolean;
 };
 
 let routeKeySeed = 0;
@@ -112,7 +113,12 @@ function nextRouteKey() {
 }
 
 function toRouteRows(routes: MailboxSettings["routes"]): RouteRow[] {
-  return routes.map((route) => ({ key: nextRouteKey(), match: route.match, provider: route.provider }));
+  return routes.map((route) => ({
+    key: nextRouteKey(),
+    match: route.match,
+    provider: route.provider,
+    allow_register: route.allow_register !== false,
+  }));
 }
 
 function textOf(value: unknown) {
@@ -237,8 +243,16 @@ export function MailboxRoutingCard() {
     if (!saved) {
       return false;
     }
-    const draft = routeRows.map((row) => ({ match: row.match.trim().toLowerCase(), provider: row.provider }));
-    const current = saved.routes.map((route) => ({ match: route.match, provider: route.provider }));
+    const draft = routeRows.map((row) => ({
+      match: row.match.trim().toLowerCase(),
+      provider: row.provider,
+      allow_register: row.allow_register,
+    }));
+    const current = saved.routes.map((route) => ({
+      match: route.match,
+      provider: route.provider,
+      allow_register: route.allow_register !== false,
+    }));
     return (
       JSON.stringify(draft) !== JSON.stringify(current) ||
       otpTimeout.trim() !== String(saved.otp_timeout_seconds) ||
@@ -253,7 +267,11 @@ export function MailboxRoutingCard() {
     return {
       providers: nextProviders,
       routes: routeRows
-        .map((row) => ({ match: row.match.trim().toLowerCase(), provider: row.provider }))
+        .map((row) => ({
+          match: row.match.trim().toLowerCase(),
+          provider: row.provider,
+          allow_register: row.allow_register,
+        }))
         .filter((row) => row.match && row.provider),
       otp_timeout_seconds: Number.isFinite(timeout) && timeout > 0 ? Math.round(timeout) : saved?.otp_timeout_seconds ?? 180,
       poll_interval_seconds:
@@ -598,7 +616,7 @@ export function MailboxRoutingCard() {
                     onClick={() =>
                       setRouteRows((prev) => [
                         ...prev,
-                        { key: nextRouteKey(), match: "", provider: providerNames[0] ?? "" },
+                        { key: nextRouteKey(), match: "", provider: providerNames[0] ?? "", allow_register: true },
                       ])
                     }
                     disabled={providerNames.length === 0}
@@ -613,17 +631,18 @@ export function MailboxRoutingCard() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_36px] gap-2 px-1 text-xs text-stone-400">
+                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_80px_36px] gap-2 px-1 text-xs text-stone-400">
                       <span>匹配（域名 / 完整邮箱 / *）</span>
                       <span>使用邮箱</span>
+                      <span className="text-center">随机注册</span>
                       <span />
                     </div>
                     {routeRows.map((row) => (
-                      <div key={row.key} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_36px] items-center gap-2">
+                      <div key={row.key} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_80px_36px] items-center gap-2">
                         <Input
                           value={row.match}
                           onChange={(event) => updateRouteRow(row.key, { match: event.target.value })}
-                          placeholder="例如：040601.com"
+                          placeholder="例如：040601.xyz"
                           className="h-10 rounded-xl border-stone-200 bg-white"
                         />
                         <Select value={row.provider} onValueChange={(value) => updateRouteRow(row.key, { provider: value })}>
@@ -638,6 +657,13 @@ export function MailboxRoutingCard() {
                             ))}
                           </SelectContent>
                         </Select>
+                        <div className="flex items-center justify-center">
+                          <Checkbox
+                            checked={row.allow_register}
+                            onCheckedChange={(checked) => updateRouteRow(row.key, { allow_register: checked === true })}
+                            title="允许定时/随机生成该域名下的新邮箱注册；关闭则仅用于已有账号或指定完整邮箱收验证码"
+                          />
+                        </div>
                         <button
                           type="button"
                           className="flex size-9 items-center justify-center rounded-lg text-stone-400 transition hover:bg-rose-50 hover:text-rose-500"

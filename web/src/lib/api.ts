@@ -1057,6 +1057,7 @@ export type MailboxProviderSettings = {
 export type MailboxRoute = {
   match: string;
   provider: string;
+  allow_register?: boolean;
 };
 
 export type MailboxSettings = {
@@ -1117,10 +1118,18 @@ export type KeeperSettings = {
   relogin_delay_max_seconds: number;
   relogin_when_access_token_expires_within_hours: number;
   keep_runs: number;
+  auto_register_enabled: boolean;
+  auto_register_time: string;
+  auto_register_domain: string;
+  auto_register_prefix: string;
+  auto_register_daily_count: number;
+  auto_register_interval_minutes: number;
+  auto_register_max_normal_accounts: number;
 };
 
 export type KeeperSettingsResponse = KeeperSettings & {
   next_run_at: string;
+  next_register_at?: string;
 };
 
 export type PatrolResult = "ok" | "relogged_in" | "relogin_failed" | "needs_manual" | "skipped" | "error";
@@ -1277,6 +1286,74 @@ export async function startPasswordImport(text: string) {
     method: "POST",
     body: { text },
   });
+}
+
+export type RegisterOutcome = "registered" | "existing_added" | "skipped" | "failed";
+
+export type RegisterRun = {
+  id: string;
+  trigger: string;
+  state: "running" | "finished" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  total: number;
+  done: number;
+  counts: Partial<Record<RegisterOutcome, number>>;
+  domain?: string;
+  interval_minutes?: number;
+  emails?: string[];
+  current_email?: string | null;
+  next_attempt_at?: string | null;
+  skip_reason?: string;
+  stopped_reason?: string;
+  error?: string;
+};
+
+export type RegisterEntry = {
+  at: string;
+  email: string;
+  ok: boolean;
+  registered: boolean;
+  outcome: RegisterOutcome;
+  error?: string;
+  detail?: string;
+};
+
+export type RegisterRunDetail = RegisterRun & {
+  entries: RegisterEntry[];
+};
+
+export type ManualRegisterOptions = {
+  domain?: string;
+  prefix?: string;
+  count?: number;
+  interval_minutes?: number;
+  emails?: string[] | string;
+};
+
+export async function runAutoRegisterNow(options?: ManualRegisterOptions) {
+  return httpRequest<Partial<RegisterRun> & { state: string }>("/api/keeper/register/run", {
+    method: "POST",
+    ...(options ? { body: options } : {}),
+  });
+}
+
+export async function stopAutoRegister() {
+  return httpRequest<{ stopped: boolean; running: boolean; id?: string }>("/api/keeper/register/stop", {
+    method: "POST",
+  });
+}
+
+export async function fetchRegisterRuns() {
+  return httpRequest<{ items: RegisterRun[] }>("/api/keeper/register/runs");
+}
+
+export async function fetchRegisterRun(runId: string) {
+  return httpRequest<RegisterRunDetail>(`/api/keeper/register/runs/${encodeURIComponent(runId)}`);
+}
+
+export async function fetchLatestKeeperJob() {
+  return httpRequest<{ job: PasswordImportJob | null }>("/api/keeper/jobs/latest");
 }
 
 export async function fetchKeeperJob(jobId: string) {

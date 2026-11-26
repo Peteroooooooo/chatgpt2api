@@ -36,17 +36,25 @@ WORKDIR /app
 # - git: Git 存储后端需要
 # - libpq-dev: PostgreSQL 客户端库
 # - gcc: 编译 psycopg2-binary 需要
+# - xvfb / fonts-liberation: 真浏览器注册所需的虚拟显示与基础字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libpq-dev \
     gcc \
     openssl \
+    xvfb \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
+
+RUN /app/.venv/bin/patchright install chromium \
+    && /app/.venv/bin/patchright install-deps chromium \
+    && ([ "${TARGETARCH}" != "amd64" ] || /app/.venv/bin/patchright install chrome || true) \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY main.py ./
 COPY config.json ./

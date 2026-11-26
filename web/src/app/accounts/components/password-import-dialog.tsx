@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, CircleAlert, KeyRound, LoaderCircle } from "lucide-react";
+import { CheckCircle2, CircleAlert, KeyRound, LoaderCircle, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -14,8 +14,22 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { fetchKeeperJob, startPasswordImport, type PasswordImportJob } from "@/lib/api";
+import {
+  fetchKeeperJob,
+  fetchLatestKeeperJob,
+  fetchMailboxSettings,
+  startPasswordImport,
+  type PasswordImportJob,
+} from "@/lib/api";
 
 // 与后端 account_keeper.CREDENTIAL_LINE / EMAIL_ONLY_LINE 一致，只用于提示识别到的行数。
 const CREDENTIAL_LINE = /^([^\s:|]+@[^\s:|]+?)(?:----|[\t|:]|\s+)(.+)$/;
@@ -35,7 +49,29 @@ function importErrorMessage(error?: string | null, detail?: string) {
   if (error?.startsWith("no_mailbox_route")) {
     return "未配置这个邮箱的收件路由，请先到「巡检 → 邮箱与路由」配置。";
   }
+  if (error === "rate_limit_exceeded") {
+    return "触发 OpenAI 频率限制，请稍后或调大间隔再试。";
+  }
+  if (error === "signup_csrf_failed_403") {
+    return "chatgpt.com 注册入口被 Cloudflare 拦截（403），需开启 FlareSolverr 过盾。";
+  }
   return error || detail;
+}
+
+function randomAliasLocal(prefix: string) {
+  const letters = "abcdefghijklmnopqrstuvwxyz";
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const rand = (len: number) =>
+    Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  const cleanPrefix = prefix
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "")
+    .replace(/^[._-]+|[._-]+$/g, "");
+  if (cleanPrefix) {
+    return `${cleanPrefix}_${rand(6)}`;
+  }
+  return `${letters[Math.floor(Math.random() * letters.length)]}${rand(7)}`;
 }
 
 function countCredentialLines(text: string) {
@@ -72,6 +108,10 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
   const [text, setText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [job, setJob] = useState<PasswordImportJob | null>(null);
+  const [domains, setDomains] = useState<string[]>([]);
+  const [selectedDomain, setSelectedDomain] = useState("");
+  const [aliasPrefix, setAliasPrefix] = useState("");
+  const [aliasCount, setAliasCount] = useState("5");
   const timerRef = useRef<number | null>(null);
   const onFinishedRef = useRef(onFinished);
 
@@ -81,6 +121,89 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
   useEffect(() => {
     onFinishedRef.current = onFinished;
   }, [onFinished]);
+
+  useEffect(() => {
+    let active = true;
+    void fetchLatestKeeperJob()
+      .then((res) => {
+        if (active && res.job && res.job.state === "running") {
+          setJob((prev) => prev ?? res.job);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    let active = true;
+    void fetchMailboxSettings()
+      .then((settings) => {
+        if (!active) {
+          return;
+        }
+        const cfProviders = new Set(
+          Object.entries(settings.providers || {})
+            .filter(([, p]) => p.kind === "cloudflare_temp_email")
+            .map(([name]) => name),
+        );
+        const list: string[] = [];
+        const cfList: string[] = [];
+        for (const route of settings.routes || []) {
+          if (route.allow_register === false) {
+            continue;
+          }
+          const match = String(route.match || "").trim().replace(/^@+/, "").toLowerCase();
+          if (!match || match === "*" || match.includes("@") || !match.includes(".")) {
+            continue;
+          }
+          if (!list.includes(match)) {
+            list.push(match);
+          }
+          if (cfProviders.has(route.provider) && !cfList.includes(match)) {
+            cfList.push(match);
+          }
+        }
+        const ordered = [...cfList, ...list.filter((d) => !cfList.includes(d))];
+        setDomains(ordered);
+        setSelectedDomain((prev) => (prev && ordered.includes(prev) ? prev : ordered[0] || ""));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [open]);
+
+  const handleGenerateAliases = () => {
+    const domain = selectedDomain.trim().replace(/^@+/, "");
+    if (!domain) {
+      toast.error("请先在「巡检 → 邮箱与路由」配置收件域名");
+      return;
+    }
+    const count = Math.min(50, Math.max(1, Math.round(Number(aliasCount) || 1)));
+    const existing = new Set(
+      text
+        .split(/\r?\n/)
+        .map((line) => line.trim().toLowerCase())
+        .filter(Boolean),
+    );
+    const generated: string[] = [];
+    let guard = 0;
+    while (generated.length < count && guard < count * 10) {
+      guard += 1;
+      const email = `${randomAliasLocal(aliasPrefix)}@${domain}`;
+      if (!existing.has(email.toLowerCase())) {
+        existing.add(email.toLowerCase());
+        generated.push(email);
+      }
+    }
+    const block = generated.join("\n");
+    setText((prev) => (prev.trim() ? `${prev.trimEnd()}\n${block}` : block));
+  };
 
   const isRunning = job?.state === "running";
   const lineCount = countCredentialLines(text);
@@ -238,7 +361,50 @@ export function PasswordImportDialog({ disabled, onFinished, open: openProp, onO
             ) : null}
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-3">
+            {domains.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 bg-stone-50/70 p-2.5">
+                <Select value={selectedDomain} onValueChange={setSelectedDomain}>
+                  <SelectTrigger className="h-8 w-36 rounded-lg border-stone-200 bg-white text-xs">
+                    <SelectValue placeholder="选择域名" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {domains.map((domain) => (
+                      <SelectItem key={domain} value={domain} className="text-xs">
+                        @{domain}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Input
+                  value={aliasPrefix}
+                  onChange={(event) => setAliasPrefix(event.target.value)}
+                  placeholder="可选前缀"
+                  className="h-8 w-24 rounded-lg border-stone-200 bg-white text-xs"
+                />
+                <div className="flex items-center gap-1">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={aliasCount}
+                    onChange={(event) => setAliasCount(event.target.value)}
+                    className="h-8 w-16 rounded-lg border-stone-200 bg-white text-center text-xs"
+                  />
+                  <span className="text-xs text-stone-500">个</span>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleGenerateAliases}
+                  className="ml-auto h-8 rounded-lg border-stone-200 bg-white px-2.5 text-xs text-stone-700 hover:bg-stone-100"
+                >
+                  <Wand2 className="size-3.5" />
+                  生成随机邮箱
+                </Button>
+              </div>
+            ) : null}
             <Textarea
               placeholder={"abc@040601.xyz\nsomeone@duck.com\nanother@example.com----password"}
               value={text}

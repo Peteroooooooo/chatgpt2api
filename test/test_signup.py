@@ -8,10 +8,10 @@ CALLBACK = "https://chatgpt.com/api/auth/callback/openai?code=ac.1&state=s"
 
 
 class Response:
-    def __init__(self, status=200, json_data=None, url="", location=""):
+    def __init__(self, status=200, json_data=None, url="", location="", text=None):
         self.status_code = status
         self._json = json_data
-        self.text = "{}" if json_data is not None else ""
+        self.text = text if text is not None else ("{}" if json_data is not None else "")
         self.url = url
         self.headers = {"Location": location} if location else {}
 
@@ -134,10 +134,63 @@ class SignupTests(unittest.TestCase):
         sent = [body["code"] for url, body in session.posts if url.endswith("/email-otp/validate")]
         self.assertEqual(sent, ["111111", "222222"])
 
-    def test_password_page_without_password_asks_for_one(self):
-        session = FakeSession("https://auth.openai.com/create-account/password", SIGNIN)
+    def test_password_page_without_password_generates_strong_password(self):
+        session = FakeSession(
+            "https://auth.openai.com/create-account/password",
+            {
+                **SIGNIN,
+                "https://auth.openai.com/api/accounts/user/register": Response(200, {"continue_url": "https://auth.openai.com/api/accounts/email-otp/send"}),
+                "https://auth.openai.com/api/accounts/email-otp/validate": Response(200, {"continue_url": "https://auth.openai.com/after-otp", "page": {"type": "about_you"}}),
+            },
+        )
         result = register_account(session, "new@x.com", "", FakeMailbox(), sentinel=sentinel)
-        self.assertEqual(result["error"], "signup_password_required")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["created"])
+        self.assertTrue(result["password_set"])
+        generated = result.get("password") or ""
+        self.assertGreaterEqual(len(generated), 12)
+        register = [body for url, body in session.posts if url.endswith("/user/register")]
+        self.assertEqual(register, [{"password": generated, "username": "new@x.com"}])
+
+    def test_cloudflare_403_refreshes_clearance_and_retries(self):
+        session = FakeSession(
+            "https://auth.openai.com/email-verification",
+            {
+                **SIGNIN,
+                "https://auth.openai.com/api/accounts/passwordless/send-otp": Response(200, {}),
+                "https://auth.openai.com/api/accounts/email-otp/validate": Response(200, {"continue_url": "https://auth.openai.com/after-otp", "page": {"type": "about_you"}}),
+            },
+        )
+        csrf_calls = {"n": 0}
+        original_get = session.get
+
+        def get(url, **kw):
+            if url.endswith("/api/auth/csrf"):
+                csrf_calls["n"] += 1
+                session.gets.append(url)
+                if csrf_calls["n"] == 1:
+                    return Response(403, text="<html><title>Just a moment...</title></html>")
+                return Response(200, {"csrfToken": "csrf"})
+            return original_get(url, **kw)
+
+        session.get = get
+
+        class FakeClearance:
+            def __init__(self):
+                self.refreshed = 0
+
+            def build_headers(self, headers, **_):
+                return dict(headers)
+
+            def refresh_clearance(self, **_):
+                self.refreshed += 1
+                return type("Bundle", (), {"cookies": {"cf_clearance": "ok"}})()
+
+        clearance = FakeClearance()
+        result = register_account(session, "new@x.com", "", FakeMailbox(), sentinel=sentinel, clearance=clearance)
+        self.assertTrue(result["ok"])
+        self.assertEqual(clearance.refreshed, 1)
+        self.assertEqual(session.cookies.get("cf_clearance"), "ok")
 
     def test_existing_account_is_left_alone(self):
         session = FakeSession("https://auth.openai.com/log-in/password", SIGNIN)

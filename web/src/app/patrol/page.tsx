@@ -27,6 +27,7 @@ import {
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
+import { AutoRegisterTab } from "./components/auto-register-tab";
 import { MailboxRoutingCard } from "./components/mailbox-routing-card";
 
 type BadgeVariant = "success" | "info" | "danger" | "warning" | "secondary";
@@ -571,6 +572,9 @@ function PatrolContent() {
               : keeper.patrol_enabled
                 ? `每天 ${keeper.patrol_time} 自动检查账号，下次 ${formatTime(keeper.next_run_at)}`
                 : "每日定时巡检已关闭，可以手动巡检"}
+            {keeper && keeper.auto_register_enabled && keeper.next_register_at
+              ? ` · 每天 ${keeper.auto_register_time} 定时注册`
+              : ""}
             {keeper && !keeper.auto_relogin_enabled ? " · 掉线后立即重登已关闭" : ""}
           </p>
         </div>
@@ -606,6 +610,9 @@ function PatrolContent() {
           <TabsTrigger value="mailbox" className="px-4">
             邮箱与路由
           </TabsTrigger>
+          <TabsTrigger value="register" className="px-4">
+            定时注册
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="settings">
@@ -620,6 +627,10 @@ function PatrolContent() {
 
         <TabsContent value="mailbox">
           <MailboxRoutingCard />
+        </TabsContent>
+
+        <TabsContent value="register">
+          <AutoRegisterTab saved={keeper} onSaved={setKeeper} />
         </TabsContent>
 
         <TabsContent value="runs">

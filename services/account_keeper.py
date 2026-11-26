@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import random
 import re
+import secrets
+import string
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +20,9 @@ CREDENTIAL_LINE = re.compile(r"^([^\s:|]+@[^\s:|]+?)(?:----|[\t|:]|\s+)(.+)$")
 EMAIL_ONLY_LINE = re.compile(r"^([^\s:|@]+@[^\s:|@]+\.[^\s:|@-]+)$")
 SETTINGS_FILE = DATA_DIR / "keeper.json"
 PATROL_DIR = DATA_DIR / "patrol"
+TIME_SETTINGS = {"patrol_time", "auto_register_time"}
+TEXT_SETTINGS = {"auto_register_domain", "auto_register_prefix"}
+REGISTER_FUSE_ERRORS = {"rate_limit_exceeded", "unsupported_country_region_territory", "signup_csrf_failed_403"}
 DEFAULT_SETTINGS = {
     "patrol_enabled": True,
     "patrol_time": "04:30",
@@ -30,6 +35,13 @@ DEFAULT_SETTINGS = {
     "relogin_delay_max_seconds": 60,
     "relogin_when_access_token_expires_within_hours": 48,
     "keep_runs": 60,
+    "auto_register_enabled": False,
+    "auto_register_time": "03:00",
+    "auto_register_domain": "",
+    "auto_register_prefix": "",
+    "auto_register_daily_count": 2,
+    "auto_register_interval_minutes": 60,
+    "auto_register_max_normal_accounts": 50,
 }
 
 
@@ -37,14 +49,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse_hhmm(value: str) -> tuple[int, int]:
+def _parse_hhmm(value: str, default_hour: int = 4, default_minute: int = 30) -> tuple[int, int]:
     try:
         hour, minute = (int(part) for part in str(value).split(":", 1))
         if 0 <= hour < 24 and 0 <= minute < 60:
             return hour, minute
     except Exception:
         pass
-    return 4, 30
+    return default_hour, default_minute
 
 
 class AccountKeeper:
@@ -56,8 +68,13 @@ class AccountKeeper:
         self.patrol_dir = patrol_dir
         self._lock = Lock()
         self._running: dict[str, Any] | None = None
+        self._register_running: dict[str, Any] | None = None
+        self._register_stop = Event()
+        self._wake_scheduler = Event()
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._latest_job_id: str | None = None
         self._sleep = Event().wait
+        self._register_wait = self._register_stop.wait
         self._apply_policy(self.get_settings())
 
     def _apply_policy(self, settings: dict[str, Any]) -> None:
@@ -85,24 +102,37 @@ class AccountKeeper:
                 current[key] = bool(value)
             elif isinstance(default, int):
                 current[key] = max(0, int(value))
-            else:
-                hour, minute = _parse_hhmm(str(value))
+            elif key in TIME_SETTINGS:
+                dh, dm = _parse_hhmm(str(default))
+                hour, minute = _parse_hhmm(str(value), dh, dm)
                 current[key] = f"{hour:02d}:{minute:02d}"
+            elif key in TEXT_SETTINGS:
+                current[key] = str(value or "").strip()
+            else:
+                current[key] = str(value or "")
         if current["relogin_delay_max_seconds"] < current["relogin_delay_min_seconds"]:
             current["relogin_delay_max_seconds"] = current["relogin_delay_min_seconds"]
         current["push_auth_wait_seconds"] = min(600, current["push_auth_wait_seconds"])
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         self.settings_file.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self._apply_policy(current)
+        self._wake_scheduler.set()
         return current
 
-    def next_run_at(self, now: datetime | None = None) -> datetime:
+    def _next_run_for_time(self, hhmm: str, default_hhmm: str, now: datetime | None = None) -> datetime:
         now = (now or _now()).astimezone(CN_TZ)
-        hour, minute = _parse_hhmm(self.get_settings()["patrol_time"])
+        dh, dm = _parse_hhmm(default_hhmm)
+        hour, minute = _parse_hhmm(hhmm, dh, dm)
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
         return target.astimezone(timezone.utc)
+
+    def next_run_at(self, now: datetime | None = None) -> datetime:
+        return self._next_run_for_time(self.get_settings()["patrol_time"], "04:30", now)
+
+    def next_register_run_at(self, now: datetime | None = None) -> datetime:
+        return self._next_run_for_time(self.get_settings()["auto_register_time"], "03:00", now)
 
     # ── one account ──────────────────────────────────────────
     def _needs_relogin_without_rt(self, account: dict, hours: int) -> bool:
@@ -279,22 +309,334 @@ class AccountKeeper:
 
     def start_scheduler(self, stop_event: Event) -> Thread:
         def worker() -> None:
+            next_patrol = self.next_run_at()
+            next_register = self.next_register_run_at()
             while not stop_event.is_set():
-                due = self.next_run_at()
-                while not stop_event.is_set() and _now() < due:
-                    stop_event.wait(min(60.0, max(1.0, (due - _now()).total_seconds())))
-                if stop_event.is_set():
-                    return
-                if self.get_settings()["patrol_enabled"]:
-                    try:
-                        self.run_patrol("schedule")
-                    except Exception as exc:
-                        print(f"[account-patrol] failed: {exc}")
-                stop_event.wait(61)
+                if self._wake_scheduler.is_set():
+                    self._wake_scheduler.clear()
+                    next_patrol = self.next_run_at()
+                    next_register = self.next_register_run_at()
+                now = _now()
+                if now >= next_patrol:
+                    if self.get_settings()["patrol_enabled"]:
+                        try:
+                            self.run_patrol("schedule")
+                        except Exception as exc:
+                            print(f"[account-patrol] failed: {exc}")
+                    next_patrol = self.next_run_at(_now() + timedelta(seconds=61))
+                if now >= next_register:
+                    if self.get_settings()["auto_register_enabled"]:
+                        try:
+                            self.start_register("schedule")
+                        except Exception as exc:
+                            print(f"[account-register] failed: {exc}")
+                    next_register = self.next_register_run_at(_now() + timedelta(seconds=61))
+                due = min(next_patrol, next_register)
+                wait_secs = min(5.0, max(0.5, (due - _now()).total_seconds()))
+                stop_event.wait(wait_secs)
 
         thread = Thread(target=worker, name="account-patrol-scheduler", daemon=True)
         thread.start()
         return thread
+
+    # ── scheduled / manual batch registration ────────────────
+    @staticmethod
+    def parse_register_domains(raw: str) -> list[str]:
+        domains: list[str] = []
+        seen: set[str] = set()
+        for part in re.split(r"[\s,;]+", str(raw or "").strip()):
+            domain = part.strip().lstrip("@").lower()
+            if not domain or "@" in domain or "." not in domain:
+                continue
+            if domain not in seen:
+                seen.add(domain)
+                domains.append(domain)
+        return domains
+
+    def _generate_register_email(self, domain: str, prefix: str, used: set[str]) -> str:
+        clean_prefix = re.sub(r"[^a-z0-9._-]", "", str(prefix or "").strip().lower()).strip("._-")
+        alphabet = string.ascii_lowercase + string.digits
+        for _ in range(20):
+            if clean_prefix:
+                local = f"{clean_prefix}_{''.join(secrets.choice(alphabet) for _ in range(6))}"
+            else:
+                local = secrets.choice(string.ascii_lowercase) + "".join(secrets.choice(alphabet) for _ in range(7))
+            candidate = f"{local}@{domain}"
+            if candidate not in used and not self.accounts.find_token_by_email(candidate):
+                used.add(candidate)
+                return candidate
+        raise RuntimeError(f"failed to generate unique email for {domain}")
+
+    def _register_runs_index(self) -> Path:
+        return self.patrol_dir / "register_runs.json"
+
+    def list_register_runs(self) -> list[dict[str, Any]]:
+        try:
+            runs = json.loads(self._register_runs_index().read_text(encoding="utf-8"))
+        except Exception:
+            runs = []
+        if self._register_running:
+            runs = [dict(self._register_running), *runs]
+        for run in runs:
+            if "emails" in run or not run.get("id"):
+                continue
+            path = self.patrol_dir / f"{run['id']}.jsonl"
+            emails: list[str] = []
+            if path.exists():
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    email = str(item.get("email") or "").strip()
+                    if email:
+                        emails.append(email)
+            run["emails"] = emails
+        return runs
+
+    def get_register_run(self, run_id: str) -> dict[str, Any] | None:
+        summary = next((run for run in self.list_register_runs() if run.get("id") == run_id), None)
+        if summary is None:
+            return None
+        path = self.patrol_dir / f"{run_id}.jsonl"
+        entries = []
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    continue
+        return {**summary, "entries": entries}
+
+    def _save_register_run(self, summary: dict[str, Any]) -> None:
+        keep = int(self.get_settings()["keep_runs"]) or 60
+        runs = [run for run in self.list_register_runs() if run.get("id") != summary["id"] and run.get("state") != "running"]
+        runs = [summary, *runs]
+        for stale in runs[keep:]:
+            (self.patrol_dir / f"{stale.get('id')}.jsonl").unlink(missing_ok=True)
+        self.patrol_dir.mkdir(parents=True, exist_ok=True)
+        self._register_runs_index().write_text(json.dumps(runs[:keep], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _count_normal_accounts(self) -> int:
+        count = 0
+        for token in self.accounts.list_tokens():
+            account = self.accounts.get_account(token) or {}
+            if account.get("status") == "正常":
+                count += 1
+        return count
+
+    @staticmethod
+    def parse_register_emails(raw: Any) -> list[str]:
+        items: list[str] = []
+        seen: set[str] = set()
+        if isinstance(raw, (list, tuple)):
+            lines = [str(item or "") for item in raw]
+        else:
+            lines = re.split(r"[\r\n,;]+", str(raw or ""))
+        for line in lines:
+            candidate = line.strip()
+            if not candidate or candidate.startswith("#"):
+                continue
+            match = EMAIL_ONLY_LINE.match(candidate)
+            if not match:
+                continue
+            email = match.group(1)
+            key = email.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(email)
+        return items
+
+    def run_register(self, trigger: str = "manual", overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        settings = self.get_settings()
+        overrides = overrides or {}
+        has_explicit_emails = overrides.get("emails") is not None and (
+            bool(overrides.get("emails")) if isinstance(overrides.get("emails"), (list, tuple)) else bool(str(overrides.get("emails") or "").strip())
+        )
+        explicit_emails = self.parse_register_emails(overrides.get("emails")) if has_explicit_emails else []
+        domain_setting = str(overrides["domain"] if overrides.get("domain") is not None else settings.get("auto_register_domain") or "")
+        prefix = str(overrides["prefix"] if overrides.get("prefix") is not None else settings.get("auto_register_prefix") or "")
+        raw_interval = overrides.get("interval_minutes")
+        interval_minutes = max(0, int(raw_interval)) if raw_interval is not None else int(settings.get("auto_register_interval_minutes") or 0)
+        raw_count = overrides.get("count")
+        daily_count = max(0, int(raw_count)) if raw_count is not None else int(settings.get("auto_register_daily_count") or 0)
+
+        summary_domain = ", ".join(dict.fromkeys(e.rsplit("@", 1)[1].lower() for e in explicit_emails)) if explicit_emails else domain_setting
+
+        with self._lock:
+            if self._register_running:
+                return dict(self._register_running)
+            self._register_stop.clear()
+            run_id = "reg-" + _now().astimezone(CN_TZ).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+            summary: dict[str, Any] = {
+                "id": run_id,
+                "trigger": trigger,
+                "state": "running",
+                "started_at": _now().isoformat(),
+                "finished_at": None,
+                "total": 0,
+                "done": 0,
+                "counts": {},
+                "domain": summary_domain,
+                "interval_minutes": interval_minutes,
+                "emails": [],
+                "current_email": None,
+                "next_attempt_at": None,
+                "skip_reason": "",
+                "stopped_reason": "",
+                "error": "",
+            }
+            self._register_running = summary
+
+        self.patrol_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self.patrol_dir / f"{run_id}.jsonl"
+        try:
+            max_normal = int(settings["auto_register_max_normal_accounts"])
+            normal_count = self._count_normal_accounts()
+
+            if has_explicit_emails:
+                if not explicit_emails:
+                    summary["skip_reason"] = "未识别到有效的完整邮箱地址"
+                    summary["state"] = "finished"
+                    return summary
+                if not any(self.accounts.has_mailbox_route(email) for email in explicit_emails):
+                    summary["skip_reason"] = f"以下邮箱未配置收件路由：{', '.join(explicit_emails)}"
+                    summary["state"] = "finished"
+                    return summary
+                target_emails = explicit_emails
+                if max_normal > 0:
+                    remaining = max(0, max_normal - normal_count)
+                    if remaining <= 0:
+                        summary["skip_reason"] = f"号池正常账号已达上限（{normal_count}/{max_normal}）"
+                        summary["state"] = "finished"
+                        return summary
+                    target_emails = explicit_emails[:remaining]
+                emails = target_emails
+            else:
+                domains = self.parse_register_domains(domain_setting)
+                if not domains:
+                    summary["skip_reason"] = "未配置注册邮箱域名"
+                    summary["state"] = "finished"
+                    return summary
+                routed_domains = [d for d in domains if self.accounts.has_mailbox_route(f"probe@{d}")]
+                if not routed_domains:
+                    summary["skip_reason"] = f"以下域名未配置收件路由：{', '.join(domains)}"
+                    summary["state"] = "finished"
+                    return summary
+
+                if daily_count <= 0:
+                    summary["skip_reason"] = "注册数量为 0"
+                    summary["state"] = "finished"
+                    return summary
+                if max_normal > 0:
+                    remaining = max(0, max_normal - normal_count)
+                    target_count = min(daily_count, remaining)
+                    if target_count <= 0:
+                        summary["skip_reason"] = f"号池正常账号已达上限（{normal_count}/{max_normal}）"
+                        summary["state"] = "finished"
+                        return summary
+                else:
+                    target_count = daily_count
+
+                used_emails: set[str] = set()
+                emails = [
+                    self._generate_register_email(routed_domains[i % len(routed_domains)], prefix, used_emails)
+                    for i in range(target_count)
+                ]
+
+            summary["total"] = len(emails)
+            consecutive_failures = 0
+
+            for index, email in enumerate(emails):
+                if self._register_stop.is_set():
+                    summary["stopped_reason"] = "已手动停止"
+                    break
+                summary["current_email"] = email
+                summary["next_attempt_at"] = None
+                try:
+                    try:
+                        result = self.accounts.login_and_add_account(email, "", prefer_browser=True)
+                    except TypeError:
+                        result = self.accounts.login_and_add_account(email, "")
+                except Exception as exc:
+                    result = {"ok": False, "email": email, "error": str(exc)}
+                ok = bool(result.get("ok"))
+                registered = bool(result.get("registered"))
+                skipped = bool(result.get("skipped"))
+                error = str(result.get("error") or "")
+                detail = str(result.get("detail") or "")[:300]
+                outcome = "skipped" if skipped else ("registered" if ok and registered else ("existing_added" if ok else "failed"))
+                entry = {
+                    "at": _now().isoformat(),
+                    "email": email,
+                    "ok": ok,
+                    "registered": registered,
+                    "outcome": outcome,
+                    "error": error,
+                    "detail": detail,
+                }
+                with log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                counts = summary["counts"]
+                counts[outcome] = int(counts.get(outcome, 0)) + 1
+                summary["done"] += 1
+                summary.setdefault("emails", []).append(email)
+                summary["current_email"] = None
+
+                if ok:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    if error in REGISTER_FUSE_ERRORS:
+                        summary["stopped_reason"] = f"触发风控熔断（{error}），停止剩余名额"
+                        break
+                    if consecutive_failures >= 2:
+                        summary["stopped_reason"] = f"连续失败 {consecutive_failures} 次（最后错误：{error or 'unknown'}），停止剩余名额"
+                        break
+
+                if index < len(emails) - 1:
+                    if interval_minutes > 0:
+                        wait_seconds = interval_minutes * 60
+                        summary["next_attempt_at"] = (_now() + timedelta(seconds=wait_seconds)).isoformat()
+                        interrupted = self._register_wait(wait_seconds)
+                        summary["next_attempt_at"] = None
+                        if interrupted or self._register_stop.is_set():
+                            summary["stopped_reason"] = "已手动停止"
+                            break
+                    else:
+                        low = int(settings["relogin_delay_min_seconds"])
+                        high = int(settings["relogin_delay_max_seconds"])
+                        self._sleep(random.uniform(low, max(low, high)))
+            summary["state"] = "finished"
+        except Exception as exc:
+            summary["state"] = "failed"
+            summary["error"] = str(exc)[:300]
+        finally:
+            summary["current_email"] = None
+            summary["next_attempt_at"] = None
+            summary["finished_at"] = _now().isoformat()
+            with self._lock:
+                self._register_running = None
+                self._save_register_run(summary)
+        return summary
+
+    def start_register(self, trigger: str = "manual", overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._register_running:
+            return dict(self._register_running)
+        Thread(target=self.run_register, args=(trigger, overrides), name="account-auto-register", daemon=True).start()
+        for _ in range(20):
+            if self._register_running:
+                return dict(self._register_running)
+            Event().wait(0.05)
+        return {"state": "starting"}
+
+    def stop_register(self) -> dict[str, Any]:
+        running = self._register_running
+        if not running:
+            return {"stopped": False, "running": False}
+        self._register_stop.set()
+        return {"stopped": True, "running": True, "id": running.get("id")}
 
     # ── email (+ optional password) import ───────────────────
     @staticmethod
@@ -327,6 +669,7 @@ class AccountKeeper:
         job_id = uuid.uuid4().hex
         job = {"id": job_id, "state": "running", "total": len(credentials), "done": 0, "items": []}
         self._jobs[job_id] = job
+        self._latest_job_id = job_id
         settings = self.get_settings()
 
         def worker() -> None:
@@ -354,6 +697,11 @@ class AccountKeeper:
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job = self._jobs.get(job_id)
         return dict(job) if job else None
+
+    def get_latest_job(self) -> dict[str, Any] | None:
+        if not self._latest_job_id:
+            return None
+        return self.get_job(self._latest_job_id)
 
 
 account_keeper = AccountKeeper(account_service)
